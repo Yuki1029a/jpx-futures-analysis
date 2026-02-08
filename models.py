@@ -1,0 +1,57 @@
+"""Data models for the application."""
+
+from dataclasses import dataclass, field
+from datetime import date
+from typing import Optional
+
+
+@dataclass
+class ParticipantVolume:
+    """One participant's daily trading volume for a specific product/contract."""
+    trade_date: date
+    product: str                # "NK225F", "TOPIXF"
+    contract_month: str         # YYMM format, e.g., "2603"
+    participant_id: str         # 5-digit string
+    participant_name_en: str
+    participant_name_jp: str
+    rank: int
+    volume: float               # Combined buy+sell total (Day+Night sum)
+    volume_day: float           # Day session only
+    volume_night: float         # Night session only
+
+
+@dataclass
+class ParticipantOI:
+    """One participant's open interest position."""
+    report_date: date
+    product: str
+    contract_month: str         # YYMM format
+    participant_id: str
+    participant_name_jp: str
+    long_volume: Optional[float]
+    short_volume: Optional[float]
+
+
+@dataclass
+class WeekDefinition:
+    """A trading week bounded by two OI report dates."""
+    start_oi_date: date         # Previous Friday's OI date
+    end_oi_date: date           # Current Friday's OI date
+    trading_days: list[date] = field(default_factory=list)
+    label: str = ""
+
+
+@dataclass
+class WeeklyParticipantRow:
+    """Aggregated weekly data for one participant, used for display."""
+    participant_id: str
+    participant_name: str
+    start_oi_long: Optional[float] = None
+    start_oi_short: Optional[float] = None
+    start_oi_net: Optional[float] = None
+    daily_volumes: dict = field(default_factory=dict)  # date -> volume
+    end_oi_long: Optional[float] = None
+    end_oi_short: Optional[float] = None
+    end_oi_net: Optional[float] = None
+    oi_net_change: Optional[float] = None
+    inferred_direction: Optional[str] = None  # "BUY", "SELL", "NEUTRAL"
