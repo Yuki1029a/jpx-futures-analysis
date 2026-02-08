@@ -288,11 +288,12 @@ def _load_oi_for_date(d: date, product: str) -> list[ParticipantOI]:
                 return []
             try:
                 if file_path in _oi_parse_cache:
-                    return _oi_parse_cache[file_path]
-                content = fetcher.download_oi_excel(file_path)
-                records = parse_oi_excel(content, [product])
-                _oi_parse_cache[file_path] = records
-                return records
+                    records = _oi_parse_cache[file_path]
+                else:
+                    content = fetcher.download_oi_excel(file_path)
+                    records = parse_oi_excel(content, None)
+                    _oi_parse_cache[file_path] = records
+                return [r for r in records if r.product == product]
             except Exception:
                 return []
 
@@ -325,9 +326,11 @@ def _load_raw_session(
                             records = _volume_parse_cache[path]
                         else:
                             content = fetcher.download_volume_excel(path)
-                            records = parse_volume_excel(content, [product])
+                            records = parse_volume_excel(content, None)
                             _volume_parse_cache[path] = records
-                        all_records.append(records)
+                        # Filter by product after cache lookup
+                        filtered = [r for r in records if r.product == product]
+                        all_records.append(filtered)
                     except Exception:
                         pass
             merged = merge_volume_records(*all_records)
