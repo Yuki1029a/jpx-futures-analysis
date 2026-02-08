@@ -1,4 +1,5 @@
 """Parse weekly open interest Excel files."""
+from __future__ import annotations
 
 import io
 import re

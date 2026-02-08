@@ -1,4 +1,5 @@
 """Data models for the application."""
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
@@ -63,6 +64,7 @@ class WeeklyParticipantRow:
 class OptionParticipantOI:
     """One participant's option open interest position."""
     report_date: date
+    contract_month: str         # YYMM format, e.g., "2602"
     option_type: str            # "PUT" or "CALL"
     strike_price: int           # Strike price (e.g., 38000)
     participant_id: str
@@ -75,6 +77,7 @@ class OptionParticipantOI:
 class OptionParticipantVolume:
     """One participant's daily option trading volume."""
     trade_date: date
+    contract_month: str         # YYMM format, e.g., "2602"
     option_type: str            # "PUT" or "CALL"
     strike_price: int           # Strike price
     participant_id: str

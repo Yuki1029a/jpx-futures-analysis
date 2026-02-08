@@ -2,12 +2,13 @@
 
 Layout:
   PUT側（左）                                   | CALL側（右）
-  前週L|前週S|1/6 1/7 ... |合計| 行使価格 |合計| ... 1/7 1/6|前週L|前週S
+  前週L|前週S|1/6 1/7 ... |合計|今週L|今週S| 行使価格 |今週L|今週S|合計| ... 1/7 1/6|前週L|前週S
 
 - Strike prices sorted descending (high to low)
 - PUT daily columns: left-to-right (old → new)
 - CALL daily columns: right-to-left (new → old)
 """
+from __future__ import annotations
 
 import streamlit as st
 import pandas as pd
@@ -76,9 +77,9 @@ def _build_display_dataframe(
         # Strike price (center)
         rec["行使価格"] = row.strike_price
 
-        # CALL OI (start)
-        rec["C前週L"] = row.call_start_oi_long
-        rec["C前週S"] = row.call_start_oi_short
+        # CALL OI (end = 今週, left side near strike)
+        rec["C今週L"] = row.call_end_oi_long
+        rec["C今週S"] = row.call_end_oi_short
 
         # CALL weekly total
         rec["C計"] = row.call_week_total
@@ -88,9 +89,9 @@ def _build_display_dataframe(
             col = _day_col(td, "C")
             rec[col] = row.call_daily_volumes.get(td) or None
 
-        # CALL OI (end)
-        rec["C今週L"] = row.call_end_oi_long
-        rec["C今週S"] = row.call_end_oi_short
+        # CALL OI (start = 前週, right edge)
+        rec["C前週L"] = row.call_start_oi_long
+        rec["C前週S"] = row.call_start_oi_short
 
         records.append(rec)
 

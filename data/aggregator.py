@@ -5,6 +5,7 @@ Night session date handling:
     e.g., Friday 1/30's night session appears in the 2/2 (Monday) file.
     We shift Night data back to the actual market date (previous business day).
 """
+from __future__ import annotations
 
 from datetime import date, datetime
 from typing import Optional
@@ -484,69 +485,172 @@ def _build_name_lookup(
 # Option aggregation
 # =====================================================================
 
+def get_available_option_contract_months(
+    week: WeekDefinition,
+) -> list[str]:
+    """Return available option contract months (YYMM) for a given week.
+
+    Checks OI data first, falls back to volume data.
+    """
+    # Try OI files
+    oi_months: set[str] = set()
+    for d in [week.end_oi_date, week.start_oi_date]:
+        if d is None:
+            continue
+        records = _load_option_oi_raw(d)
+        for r in records:
+            if r.contract_month:
+                oi_months.add(r.contract_month)
+        if oi_months:
+            break
+
+    if oi_months:
+        return sorted(oi_months)
+
+    # Fallback: check volume data from the first trading day
+    if week.trading_days:
+        vol_records = _load_option_volume_for_market_date(
+            week.trading_days[0], SESSION_ALL
+        )
+        vol_months = set(r.contract_month for r in vol_records if r.contract_month)
+        if vol_months:
+            return sorted(vol_months)
+
+    return []
+
+
+def get_option_participants(
+    week: WeekDefinition,
+    contract_month: str,
+    session_keys=SESSION_ALL,
+) -> list[tuple[str, str]]:
+    """Return list of (participant_id, display_name) for option data.
+
+    Combines participants from OI and volume data.
+    """
+    pid_names: dict[str, str] = {}
+
+    # From OI
+    for d in [week.end_oi_date, week.start_oi_date]:
+        if d is None:
+            continue
+        records = _load_option_oi_raw(d)
+        for r in records:
+            if r.contract_month == contract_month and r.participant_id:
+                if r.participant_id not in pid_names:
+                    pid_names[r.participant_id] = r.participant_name_jp or r.participant_id
+
+    # From volume (first few trading days)
+    for td in week.trading_days[:3]:
+        vol_records = _load_option_volume_for_market_date(td, session_keys)
+        for r in vol_records:
+            if r.contract_month == contract_month and r.participant_id:
+                name = r.participant_name_en or r.participant_name_jp or r.participant_id
+                pid_names[r.participant_id] = name
+
+    return sorted(pid_names.items(), key=lambda x: x[1])
+
+
 def load_option_weekly_data(
     week: WeekDefinition,
+    contract_month: str = "",
     session_keys=SESSION_ALL,
+    participant_ids: list[str] | None = None,
 ) -> list[OptionStrikeRow]:
     """Load option data for a week: OI + daily volumes, aggregated by strike.
 
-    Returns OptionStrikeRow per strike price with all-participant totals.
+    Args:
+        week: Week definition.
+        contract_month: YYMM filter (empty = all).
+        session_keys: Session filter.
+        participant_ids: If provided, only include these participants.
+
+    Returns OptionStrikeRow per strike price with filtered participant totals.
     """
     # 1. Load OI
-    start_oi = _load_option_oi_for_date(week.start_oi_date)
+    start_oi = _load_option_oi_for_date(
+        week.start_oi_date, contract_month, participant_ids
+    )
     end_oi = {}
     if week.end_oi_date:
-        end_oi = _load_option_oi_for_date(week.end_oi_date)
+        end_oi = _load_option_oi_for_date(
+            week.end_oi_date, contract_month, participant_ids
+        )
 
     # 2. Load daily option volumes
     daily_vols: dict[date, list[OptionParticipantVolume]] = {}
     for td in week.trading_days:
         records = _load_option_volume_for_market_date(td, session_keys)
+        # Filter by contract_month
+        if contract_month:
+            records = [r for r in records if r.contract_month == contract_month]
+        # Filter by participant
+        if participant_ids is not None:
+            pid_set = set(participant_ids)
+            records = [r for r in records if r.participant_id in pid_set]
         daily_vols[td] = records
 
     # 3. Aggregate by strike
     return _aggregate_by_strike(start_oi, end_oi, daily_vols, week)
 
 
-def _load_option_oi_for_date(d: date) -> dict[tuple[str, int], tuple[float, float]]:
-    """Load option OI for a date.
-
-    Returns {(option_type, strike_price): (total_long, total_short)}
-    summed across all participants.
-    """
+def _load_option_oi_raw(d: date) -> list[OptionParticipantOI]:
+    """Load raw option OI records for a date (cached)."""
     year = str(d.year)
     date_str = d.strftime("%Y%m%d")
 
     try:
         entries = fetcher.get_oi_index(year)
     except Exception:
-        return {}
+        return []
 
     for entry in entries:
         if entry["TradeDate"] == date_str:
             file_path = entry.get("IndexOptions")
             if not file_path:
-                return {}
+                return []
             try:
                 if file_path in _option_oi_parse_cache:
-                    records = _option_oi_parse_cache[file_path]
-                else:
-                    content = fetcher.download_oi_excel(file_path)
-                    records = parse_option_oi_excel(content)
-                    _option_oi_parse_cache[file_path] = records
-                # Aggregate long/short per (type, strike)
-                agg: dict[tuple[str, int], list[float]] = {}
-                for r in records:
-                    key = (r.option_type, r.strike_price)
-                    if key not in agg:
-                        agg[key] = [0.0, 0.0]
-                    agg[key][0] += (r.long_volume or 0)
-                    agg[key][1] += (r.short_volume or 0)
-                return {k: (v[0], v[1]) for k, v in agg.items()}
+                    return _option_oi_parse_cache[file_path]
+                content = fetcher.download_oi_excel(file_path)
+                records = parse_option_oi_excel(content)
+                _option_oi_parse_cache[file_path] = records
+                return records
             except Exception:
-                return {}
+                return []
 
-    return {}
+    return []
+
+
+def _load_option_oi_for_date(
+    d: date,
+    contract_month: str = "",
+    participant_ids: list[str] | None = None,
+) -> dict[tuple[str, int], tuple[float, float]]:
+    """Load option OI for a date.
+
+    Returns {(option_type, strike_price): (total_long, total_short)}
+    summed across filtered participants.
+    """
+    records = _load_option_oi_raw(d)
+
+    # Apply filters
+    filtered = records
+    if contract_month:
+        filtered = [r for r in filtered if r.contract_month == contract_month]
+    if participant_ids is not None:
+        pid_set = set(participant_ids)
+        filtered = [r for r in filtered if r.participant_id in pid_set]
+
+    # Aggregate long/short per (type, strike)
+    agg: dict[tuple[str, int], list[float]] = {}
+    for r in filtered:
+        key = (r.option_type, r.strike_price)
+        if key not in agg:
+            agg[key] = [0.0, 0.0]
+        agg[key][0] += (r.long_volume or 0)
+        agg[key][1] += (r.short_volume or 0)
+    return {k: (v[0], v[1]) for k, v in agg.items()}
 
 
 def _load_option_volume_raw_session(

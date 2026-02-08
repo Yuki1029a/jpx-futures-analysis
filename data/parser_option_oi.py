@@ -13,6 +13,7 @@ Excel structure (nk225op_oi_by_tp.xlsx):
   CALL side: C11=rank, C12=strike, C13=short_pid, C14=short_name, C15=short_vol,
              C16=long_pid, C17=long_name, C18=long_vol
 """
+from __future__ import annotations
 
 import io
 import re
@@ -44,6 +45,7 @@ def parse_option_oi_excel(content: bytes) -> list[OptionParticipantOI]:
     ws = wb.active
 
     report_date = _extract_report_date(ws)
+    contract_month = _extract_contract_month(ws)
     data_start = _find_data_start(ws)
 
     results = []
@@ -55,7 +57,7 @@ def parse_option_oi_excel(content: bytes) -> list[OptionParticipantOI]:
         if put_strike is not None:
             strike_int = int(float(put_strike))
             results.extend(_parse_strike_block(
-                ws, row, "PUT", strike_int, report_date, _PUT_COLS
+                ws, row, "PUT", strike_int, report_date, contract_month, _PUT_COLS
             ))
 
         # Parse CALL side of this strike block
@@ -63,7 +65,7 @@ def parse_option_oi_excel(content: bytes) -> list[OptionParticipantOI]:
         if call_strike is not None:
             strike_int = int(float(call_strike))
             results.extend(_parse_strike_block(
-                ws, row, "CALL", strike_int, report_date, _CALL_COLS
+                ws, row, "CALL", strike_int, report_date, contract_month, _CALL_COLS
             ))
 
         row += _ROWS_PER_STRIKE
@@ -85,6 +87,22 @@ def _extract_report_date(ws) -> date:
     raise ValueError("Could not extract report date from option OI Excel")
 
 
+def _extract_contract_month(ws) -> str:
+    """Extract contract month from row 7.
+
+    Row 7 C2: 'プット（2026年02月限月）' -> '2602'
+    """
+    for col in [2, 12]:
+        val = ws.cell(row=7, column=col).value
+        if val:
+            digits = re.findall(r'\d+', str(val))
+            if len(digits) >= 2:
+                year = digits[0]
+                month = digits[1].zfill(2)
+                return year[2:] + month
+    return ""
+
+
 def _find_data_start(ws) -> int:
     """Find the first data row (where rank=1 appears in column A)."""
     for row_idx in range(8, min(20, ws.max_row + 1)):
@@ -100,7 +118,7 @@ def _find_data_start(ws) -> int:
 
 def _parse_strike_block(
     ws, start_row: int, option_type: str, strike: int,
-    report_date: date, cols: dict,
+    report_date: date, contract_month: str, cols: dict,
 ) -> list[OptionParticipantOI]:
     """Parse one strike block (15 rows) for one side (PUT or CALL)."""
     records = []
@@ -115,6 +133,7 @@ def _parse_strike_block(
             short_vol = ws.cell(row=row, column=cols["short_vol"]).value
             records.append(OptionParticipantOI(
                 report_date=report_date,
+                contract_month=contract_month,
                 option_type=option_type,
                 strike_price=strike,
                 participant_id=str(short_pid),
@@ -130,6 +149,7 @@ def _parse_strike_block(
             long_vol = ws.cell(row=row, column=cols["long_vol"]).value
             records.append(OptionParticipantOI(
                 report_date=report_date,
+                contract_month=contract_month,
                 option_type=option_type,
                 strike_price=strike,
                 participant_id=str(long_pid),
@@ -142,10 +162,10 @@ def _parse_strike_block(
 
 
 def _consolidate(records: list[OptionParticipantOI]) -> list[OptionParticipantOI]:
-    """Merge long/short into single records per (option_type, strike, pid)."""
+    """Merge long/short into single records per (contract_month, option_type, strike, pid)."""
     key_map: dict[tuple, OptionParticipantOI] = {}
     for rec in records:
-        key = (rec.option_type, rec.strike_price, rec.participant_id)
+        key = (rec.contract_month, rec.option_type, rec.strike_price, rec.participant_id)
         if key in key_map:
             existing = key_map[key]
             if rec.long_volume is not None:

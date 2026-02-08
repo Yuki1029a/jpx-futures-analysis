@@ -1,4 +1,5 @@
 """Parse daily trading volume Excel files."""
+from __future__ import annotations
 
 import io
 import re
@@ -121,7 +122,7 @@ def parse_option_volume_excel(content: bytes) -> list[OptionParticipantVolume]:
             continue
 
         contract_desc = str(ws.cell(row=row_idx, column=config.VOLUME_COLUMNS["contract"]).value or "")
-        option_type, strike = _parse_option_contract(contract_desc)
+        option_type, contract_month, strike = _parse_option_contract(contract_desc)
         if not option_type:
             continue
 
@@ -138,6 +139,7 @@ def parse_option_volume_excel(content: bytes) -> list[OptionParticipantVolume]:
 
         results.append(OptionParticipantVolume(
             trade_date=trade_date,
+            contract_month=contract_month,
             option_type=option_type,
             strike_price=strike,
             participant_id=pid,
@@ -153,19 +155,20 @@ def parse_option_volume_excel(content: bytes) -> list[OptionParticipantVolume]:
     return results
 
 
-def _parse_option_contract(desc: str) -> tuple[str, int]:
-    """Parse 'NIKKEI 225 OOP P2602-53250' -> ('PUT', 53250).
+def _parse_option_contract(desc: str) -> tuple[str, str, int]:
+    """Parse 'NIKKEI 225 OOP P2602-53250' -> ('PUT', '2602', 53250).
 
-    Returns ('', 0) if not parseable.
+    Returns ('', '', 0) if not parseable.
     """
     # Match P or C followed by YYMM-strike
     m = re.search(r'([PC])(\d{4})-(\d+)', desc)
     if not m:
-        return ("", 0)
+        return ("", "", 0)
     opt_char = m.group(1)
+    contract_month = m.group(2)
     strike = int(m.group(3))
     option_type = "PUT" if opt_char == "P" else "CALL"
-    return (option_type, strike)
+    return (option_type, contract_month, strike)
 
 
 def merge_option_volume_records(
@@ -175,7 +178,7 @@ def merge_option_volume_records(
     combined: dict[tuple, OptionParticipantVolume] = {}
     for records in record_lists:
         for r in records:
-            key = (r.trade_date, r.option_type, r.strike_price, r.participant_id)
+            key = (r.trade_date, r.contract_month, r.option_type, r.strike_price, r.participant_id)
             if key in combined:
                 existing = combined[key]
                 existing.volume += r.volume
@@ -184,6 +187,7 @@ def merge_option_volume_records(
             else:
                 combined[key] = OptionParticipantVolume(
                     trade_date=r.trade_date,
+                    contract_month=r.contract_month,
                     option_type=r.option_type,
                     strike_price=r.strike_price,
                     participant_id=r.participant_id,

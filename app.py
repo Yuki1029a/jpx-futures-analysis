@@ -2,6 +2,7 @@
 
 Run with: streamlit run app.py
 """
+from __future__ import annotations
 
 import streamlit as st
 from data.cache import ensure_cache_dirs
@@ -46,12 +47,16 @@ def _get_or_load(product, contract_month, week, sk_str, session_keys):
     return st.session_state[key_rows], st.session_state[key_stats]
 
 
-def _get_or_load_options(week, sk_str, session_keys):
+def _get_or_load_options(week, contract_month, sk_str, session_keys, participant_ids):
     """Load option data using session_state as cache."""
-    key = f"opt_rows|{week.label}|{sk_str}"
+    pid_str = ",".join(sorted(participant_ids)) if participant_ids is not None else "ALL"
+    key = f"opt_rows|{week.label}|{contract_month}|{sk_str}|{pid_str}"
     if key not in st.session_state:
         st.session_state[key] = load_option_weekly_data(
-            week, session_keys=session_keys,
+            week,
+            contract_month=contract_month,
+            session_keys=session_keys,
+            participant_ids=participant_ids,
         )
     return st.session_state[key]
 
@@ -62,6 +67,8 @@ def main():
     product = selections["product"]
     week = selections["week"]
     contract_month = selections["contract_month"]
+    opt_cm = selections["option_contract_month"]
+    opt_pids = selections["option_participant_ids"]
 
     # Top-level tabs: Futures vs Options
     main_tab1, main_tab2 = st.tabs(["先物分析", "オプション分析"])
@@ -70,7 +77,7 @@ def main():
         _render_futures_section(product, week, contract_month)
 
     with main_tab2:
-        _render_options_section(week)
+        _render_options_section(week, opt_cm, opt_pids)
 
 
 def _render_futures_section(product, week, contract_month):
@@ -109,8 +116,12 @@ def _render_futures_section(product, week, contract_month):
                     render_daily_volume_stacked(rows, week)
 
 
-def _render_options_section(week):
+def _render_options_section(week, opt_cm, opt_pids):
     """Render the options analysis tabs."""
+    if not opt_cm:
+        st.info("オプション限月を選択してください")
+        return
+
     tab_labels = list(SESSION_MODES.keys())
     tabs = st.tabs(tab_labels)
 
@@ -120,7 +131,9 @@ def _render_options_section(week):
             sk_str = label
 
             with st.spinner("オプションデータ読み込み中..."):
-                opt_rows = _get_or_load_options(week, sk_str, session_keys)
+                opt_rows = _get_or_load_options(
+                    week, opt_cm, sk_str, session_keys, opt_pids,
+                )
 
             if not opt_rows:
                 st.info("オプションデータなし")

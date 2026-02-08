@@ -1,4 +1,5 @@
 """Fetch JSON indexes and Excel files from JPX website."""
+from __future__ import annotations
 
 import requests
 from pathlib import Path
