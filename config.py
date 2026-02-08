@@ -83,4 +83,18 @@ PRODUCT_DISPLAY_NAMES = {
     "NK225F": "日経225先物",
     "TOPIXF": "TOPIX先物",
     "NK225MF": "日経225mini",
+    "NK225OP": "日経225オプション",
+}
+
+# --- Options Configuration ---
+OPTION_OI_SECTION_KEYWORDS = {
+    "PUT": ["put", "プット", "PUT"],
+    "CALL": ["call", "コール", "CALL"],
+}
+
+OPTION_STRIKE_DISPLAY_RANGE = {
+    "ATM±5": 5,
+    "ATM±10": 10,
+    "ATM±20": 20,
+    "全て": 9999,
 }

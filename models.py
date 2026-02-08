@@ -57,3 +57,50 @@ class WeeklyParticipantRow:
     inferred_direction: Optional[str] = None  # "BUY", "SELL", "NEUTRAL"
     avg_20d: Optional[float] = None           # 20-day average daily volume
     max_20d: Optional[float] = None           # 20-day max daily volume
+
+
+@dataclass
+class OptionParticipantOI:
+    """One participant's option open interest position."""
+    report_date: date
+    option_type: str            # "PUT" or "CALL"
+    strike_price: int           # Strike price (e.g., 38000)
+    participant_id: str
+    participant_name_jp: str
+    long_volume: Optional[float]
+    short_volume: Optional[float]
+
+
+@dataclass
+class OptionParticipantVolume:
+    """One participant's daily option trading volume."""
+    trade_date: date
+    option_type: str            # "PUT" or "CALL"
+    strike_price: int           # Strike price
+    participant_id: str
+    participant_name_en: str
+    participant_name_jp: str
+    rank: int
+    volume: float               # Combined buy+sell total (Day+Night sum)
+    volume_day: float           # Day session only
+    volume_night: float         # Night session only
+
+
+@dataclass
+class OptionStrikeRow:
+    """Aggregated weekly data for one strike price, used for display."""
+    strike_price: int
+    # PUT side data
+    put_start_oi_long: Optional[float] = None
+    put_start_oi_short: Optional[float] = None
+    put_end_oi_long: Optional[float] = None
+    put_end_oi_short: Optional[float] = None
+    put_daily_volumes: dict = field(default_factory=dict)  # date -> total_volume
+    put_week_total: Optional[float] = None
+    # CALL side data
+    call_start_oi_long: Optional[float] = None
+    call_start_oi_short: Optional[float] = None
+    call_end_oi_long: Optional[float] = None
+    call_end_oi_short: Optional[float] = None
+    call_daily_volumes: dict = field(default_factory=dict)  # date -> total_volume
+    call_week_total: Optional[float] = None

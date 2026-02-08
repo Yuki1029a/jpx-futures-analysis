@@ -1,10 +1,11 @@
 """Parse daily trading volume Excel files."""
 
 import io
+import re
 import openpyxl
 from datetime import datetime
 from typing import Optional
-from models import ParticipantVolume
+from models import ParticipantVolume, OptionParticipantVolume
 import config
 
 
@@ -96,6 +97,104 @@ def _extract_contract_month(contract_desc: str) -> str:
         return ""
     parts = contract_desc.strip().split()
     return parts[-1] if parts else ""
+
+
+def parse_option_volume_excel(content: bytes) -> list[OptionParticipantVolume]:
+    """Parse option volume records (NK225E) from a daily volume Excel file.
+
+    Contract format: 'NIKKEI 225 OOP P2602-53250'
+      P/C = PUT/CALL, 2602 = YYMM, 53250 = strike price
+    """
+    wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+    ws = wb.active
+
+    trade_date_str = str(ws.cell(row=5, column=3).value).strip()
+    trade_date = datetime.strptime(trade_date_str, "%Y%m%d").date()
+
+    header_text = str(ws.cell(row=2, column=1).value or "")
+    is_night = "Night" in header_text
+
+    results = []
+    for row_idx in range(config.VOLUME_DATA_START_ROW, ws.max_row + 1):
+        product = ws.cell(row=row_idx, column=config.VOLUME_COLUMNS["product"]).value
+        if product is None or str(product) != "NK225E":
+            continue
+
+        contract_desc = str(ws.cell(row=row_idx, column=config.VOLUME_COLUMNS["contract"]).value or "")
+        option_type, strike = _parse_option_contract(contract_desc)
+        if not option_type:
+            continue
+
+        pid = str(ws.cell(row=row_idx, column=config.VOLUME_COLUMNS["participant_id"]).value or "")
+        name_en = ws.cell(row=row_idx, column=config.VOLUME_COLUMNS["name_en"]).value or ""
+        name_jp = ws.cell(row=row_idx, column=config.VOLUME_COLUMNS["name_jp"]).value or ""
+
+        rank_val = ws.cell(row=row_idx, column=config.VOLUME_COLUMNS["rank"]).value
+        rank = int(rank_val) if rank_val else 0
+
+        vol = _parse_volume_value(
+            ws.cell(row=row_idx, column=config.VOLUME_COLUMNS["volume"]).value
+        )
+
+        results.append(OptionParticipantVolume(
+            trade_date=trade_date,
+            option_type=option_type,
+            strike_price=strike,
+            participant_id=pid,
+            participant_name_en=name_en,
+            participant_name_jp=name_jp,
+            rank=rank,
+            volume=vol,
+            volume_day=0.0 if is_night else vol,
+            volume_night=vol if is_night else 0.0,
+        ))
+
+    wb.close()
+    return results
+
+
+def _parse_option_contract(desc: str) -> tuple[str, int]:
+    """Parse 'NIKKEI 225 OOP P2602-53250' -> ('PUT', 53250).
+
+    Returns ('', 0) if not parseable.
+    """
+    # Match P or C followed by YYMM-strike
+    m = re.search(r'([PC])(\d{4})-(\d+)', desc)
+    if not m:
+        return ("", 0)
+    opt_char = m.group(1)
+    strike = int(m.group(3))
+    option_type = "PUT" if opt_char == "P" else "CALL"
+    return (option_type, strike)
+
+
+def merge_option_volume_records(
+    *record_lists: list[OptionParticipantVolume],
+) -> list[OptionParticipantVolume]:
+    """Merge option volume records across sessions."""
+    combined: dict[tuple, OptionParticipantVolume] = {}
+    for records in record_lists:
+        for r in records:
+            key = (r.trade_date, r.option_type, r.strike_price, r.participant_id)
+            if key in combined:
+                existing = combined[key]
+                existing.volume += r.volume
+                existing.volume_day += r.volume_day
+                existing.volume_night += r.volume_night
+            else:
+                combined[key] = OptionParticipantVolume(
+                    trade_date=r.trade_date,
+                    option_type=r.option_type,
+                    strike_price=r.strike_price,
+                    participant_id=r.participant_id,
+                    participant_name_en=r.participant_name_en,
+                    participant_name_jp=r.participant_name_jp,
+                    rank=r.rank,
+                    volume=r.volume,
+                    volume_day=r.volume_day,
+                    volume_night=r.volume_night,
+                )
+    return list(combined.values())
 
 
 def merge_volume_records(
