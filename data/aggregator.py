@@ -390,6 +390,52 @@ def _load_volume_for_market_date(
         return _load_raw_session(market_date, product, contract_month, requested_keys)
 
 
+def compute_20d_stats(
+    week: WeekDefinition,
+    product: str,
+    contract_month: str,
+    session_keys=SESSION_ALL,
+) -> dict[str, tuple[float, float]]:
+    """Compute 20-business-day average and max daily volume per participant.
+
+    Looks back 20 trading dates from the start of the given week.
+    Returns: {participant_id: (avg, max)}
+    """
+    _ensure_trading_date_index()
+
+    # Find the 20 trading dates ending at the day before the week starts
+    # Use all trading dates up to and including the last trading day before week.trading_days[0]
+    if not week.trading_days:
+        return {}
+
+    week_start = week.trading_days[0]
+    lookback_dates = [d for d in _trading_dates_cache if d < week_start]
+    lookback_dates = lookback_dates[-20:]  # last 20
+
+    if not lookback_dates:
+        return {}
+
+    # Load daily volumes for each lookback date
+    # pid -> list of daily volumes
+    pid_daily: dict[str, list[float]] = {}
+
+    for td in lookback_dates:
+        records = _load_volume_for_market_date(
+            td, product, contract_month, session_keys
+        )
+        for r in records:
+            pid_daily.setdefault(r.participant_id, []).append(r.volume)
+
+    # Compute stats
+    result = {}
+    for pid, volumes in pid_daily.items():
+        avg = sum(volumes) / len(volumes)
+        mx = max(volumes)
+        result[pid] = (avg, mx)
+
+    return result
+
+
 def _build_name_lookup(
     daily_volumes: dict,
     start_oi: dict[str, ParticipantOI],

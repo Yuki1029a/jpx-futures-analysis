@@ -75,6 +75,8 @@ def _build_display_dataframe(
                 weekly_total += vol
 
         rec["週間計"] = weekly_total if weekly_total > 0 else None
+        rec["20日平均"] = round(row.avg_20d) if row.avg_20d is not None else None
+        rec["20日最大"] = round(row.max_20d) if row.max_20d is not None else None
 
         if show_oi:
             rec["今週L"] = row.end_oi_long
@@ -102,7 +104,7 @@ def _apply_table_styling(df: pd.DataFrame, week: WeekDefinition, show_oi: bool):
 
     # Identify column groups
     day_cols = [f"{td.strftime('%m/%d')}({_DOW_JP[td.weekday()]})" for td in week.trading_days]
-    int_cols = list(day_cols) + ["週間計"]
+    int_cols = list(day_cols) + ["週間計", "20日平均", "20日最大"]
 
     net_cols = []
     if show_oi:

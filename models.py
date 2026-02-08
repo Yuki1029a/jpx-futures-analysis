@@ -55,3 +55,5 @@ class WeeklyParticipantRow:
     end_oi_net: Optional[float] = None
     oi_net_change: Optional[float] = None
     inferred_direction: Optional[str] = None  # "BUY", "SELL", "NEUTRAL"
+    avg_20d: Optional[float] = None           # 20-day average daily volume
+    max_20d: Optional[float] = None           # 20-day max daily volume

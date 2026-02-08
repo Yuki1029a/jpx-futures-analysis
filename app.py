@@ -5,7 +5,7 @@ Run with: streamlit run app.py
 
 import streamlit as st
 from data.cache import ensure_cache_dirs
-from data.aggregator import load_weekly_data, SESSION_MODES
+from data.aggregator import load_weekly_data, compute_20d_stats, SESSION_MODES
 from ui.sidebar import render_sidebar
 from ui.weekly_table import render_weekly_table
 from ui.charts import render_net_change_bar_chart, render_daily_volume_stacked
@@ -41,6 +41,13 @@ def main():
                     session_keys=session_keys,
                     include_oi=True,
                 )
+                stats_20d = compute_20d_stats(
+                    week, product, contract_month,
+                    session_keys=session_keys,
+                )
+                for row in rows:
+                    if row.participant_id in stats_20d:
+                        row.avg_20d, row.max_20d = stats_20d[row.participant_id]
 
             if not rows:
                 st.info("該当データなし")
