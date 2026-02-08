@@ -22,6 +22,8 @@ import config
 
 _trading_dates_cache: list[date] | None = None
 _next_td_map: dict[date, date] | None = None  # market_date -> next trading date
+_volume_parse_cache: dict[str, list[ParticipantVolume]] = {}  # file_path -> parsed records
+_oi_parse_cache: dict[str, list[ParticipantOI]] = {}  # file_path -> parsed records
 
 
 def _ensure_trading_date_index():
@@ -285,8 +287,11 @@ def _load_oi_for_date(d: date, product: str) -> list[ParticipantOI]:
             if not file_path:
                 return []
             try:
+                if file_path in _oi_parse_cache:
+                    return _oi_parse_cache[file_path]
                 content = fetcher.download_oi_excel(file_path)
                 records = parse_oi_excel(content, [product])
+                _oi_parse_cache[file_path] = records
                 return records
             except Exception:
                 return []
@@ -316,8 +321,12 @@ def _load_raw_session(
                 path = entry.get(key)
                 if path:
                     try:
-                        content = fetcher.download_volume_excel(path)
-                        records = parse_volume_excel(content, [product])
+                        if path in _volume_parse_cache:
+                            records = _volume_parse_cache[path]
+                        else:
+                            content = fetcher.download_volume_excel(path)
+                            records = parse_volume_excel(content, [product])
+                            _volume_parse_cache[path] = records
                         all_records.append(records)
                     except Exception:
                         pass
