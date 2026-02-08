@@ -103,9 +103,6 @@ def main():
                     wk_start, wk_end, wk_tdays,
                     product, contract_month, sk_str,
                 )
-                for row in rows:
-                    if row.participant_id in stats_20d:
-                        row.avg_20d, row.max_20d = stats_20d[row.participant_id]
 
             if not rows:
                 st.info("該当データなし")
@@ -115,6 +112,7 @@ def main():
                 rows, week, product, contract_month,
                 show_oi=True,
                 tab_label=label,
+                stats_20d=stats_20d,
             )
 
             if is_total:

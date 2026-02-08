@@ -18,6 +18,7 @@ def render_weekly_table(
     contract_month: str,
     show_oi: bool = True,
     tab_label: str = "",
+    stats_20d: dict | None = None,
 ) -> None:
     """Render the main weekly analysis table.
 
@@ -25,6 +26,7 @@ def render_weekly_table(
         show_oi: If True, include OI columns (前週L/S/Net, 今週L/S/Net, 増減, 推定買/売, 方向).
                  If False, show only daily volumes and weekly total (for session-specific tabs).
         tab_label: Label shown in subheader for session context.
+        stats_20d: {participant_id: (avg, max)} - 20-day stats passed separately to avoid mutating cached rows.
     """
     cm_label = f"20{contract_month[:2]}年{contract_month[2:]}月限" if contract_month else ""
     title = f"{config.PRODUCT_DISPLAY_NAMES.get(product, product)} {cm_label}  ({week.label})"
@@ -36,7 +38,7 @@ def render_weekly_table(
         st.warning("選択された条件のデータがありません。")
         return
 
-    df = _build_display_dataframe(rows, week, show_oi)
+    df = _build_display_dataframe(rows, week, show_oi, stats_20d)
     styled = _apply_table_styling(df, week, show_oi)
 
     st.dataframe(
@@ -53,6 +55,7 @@ def _build_display_dataframe(
     rows: list[WeeklyParticipantRow],
     week: WeekDefinition,
     show_oi: bool,
+    stats_20d: dict | None = None,
 ) -> pd.DataFrame:
     """Build the display DataFrame with numeric columns for proper sorting."""
     records = []
@@ -75,8 +78,14 @@ def _build_display_dataframe(
                 weekly_total += vol
 
         rec["週間計"] = weekly_total if weekly_total > 0 else None
-        rec["20日平均"] = round(row.avg_20d) if row.avg_20d is not None else None
-        rec["20日最大"] = round(row.max_20d) if row.max_20d is not None else None
+
+        # 20-day stats from separate dict (not from row object)
+        avg_20d = None
+        max_20d = None
+        if stats_20d and row.participant_id in stats_20d:
+            avg_20d, max_20d = stats_20d[row.participant_id]
+        rec["20日平均"] = round(avg_20d) if avg_20d is not None else None
+        rec["20日最大"] = round(max_20d) if max_20d is not None else None
 
         if show_oi:
             rec["今週L"] = row.end_oi_long
