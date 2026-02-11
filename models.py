@@ -103,6 +103,18 @@ class DailyOIBalance:
 
 
 @dataclass
+class DailyFuturesOI:
+    """Aggregate daily open interest balance for one futures contract month."""
+    report_date: date
+    product: str                # "NK225", "NK225mini", "TOPIX", etc.
+    contract_month: str         # YYMM, e.g. "2603"
+    trading_volume: int
+    current_oi: int
+    net_change: int
+    previous_oi: int
+
+
+@dataclass
 class OptionStrikeRow:
     """Aggregated weekly data for one strike price, used for display."""
     strike_price: int

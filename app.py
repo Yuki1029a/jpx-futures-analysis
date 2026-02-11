@@ -8,7 +8,7 @@ import streamlit as st
 from data.cache import ensure_cache_dirs
 from data.aggregator import (
     load_weekly_data, compute_20d_stats,
-    load_option_weekly_data, SESSION_MODES,
+    load_option_weekly_data, load_daily_futures_oi, SESSION_MODES,
 )
 from ui.sidebar import render_sidebar
 from ui.weekly_table import render_weekly_table
@@ -89,6 +89,9 @@ def _render_futures_section(product, week, contract_month):
     tab_labels = list(SESSION_MODES.keys())
     tabs = st.tabs(tab_labels)
 
+    # Load daily futures OI once (same data for all session tabs)
+    daily_fut_oi = load_daily_futures_oi(week, product, contract_month)
+
     for tab, label in zip(tabs, tab_labels):
         with tab:
             session_keys = SESSION_MODES[label]
@@ -109,6 +112,7 @@ def _render_futures_section(product, week, contract_month):
                 show_oi=True,
                 tab_label=label,
                 stats_20d=stats_20d,
+                daily_futures_oi=daily_fut_oi,
             )
 
             if is_total:

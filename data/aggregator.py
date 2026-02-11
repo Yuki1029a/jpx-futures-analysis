@@ -13,7 +13,7 @@ from models import (
     ParticipantVolume, ParticipantOI,
     WeekDefinition, WeeklyParticipantRow,
     OptionParticipantOI, OptionParticipantVolume, OptionStrikeRow,
-    DailyOIBalance,
+    DailyOIBalance, DailyFuturesOI,
 )
 from data import fetcher
 from data.parser_volume import (
@@ -22,7 +22,7 @@ from data.parser_volume import (
 )
 from data.parser_oi import parse_oi_excel
 from data.parser_option_oi import parse_option_oi_excel
-from data.parser_daily_oi import parse_daily_oi_excel
+from data.parser_daily_oi import parse_daily_oi_excel, parse_daily_futures_oi_excel
 import config
 
 
@@ -638,6 +638,41 @@ def _load_daily_oi_for_date(
     if contract_month:
         records = [r for r in records if r.contract_month == contract_month]
     return records
+
+
+_daily_futures_oi_cache: dict[str, list[DailyFuturesOI]] = {}
+
+
+def load_daily_futures_oi(
+    week: WeekDefinition,
+    product: str,
+    contract_month: str,
+) -> dict[date, DailyFuturesOI]:
+    """Load daily futures OI balance for each trading day in the week.
+
+    Returns {date: DailyFuturesOI} for the matching product and contract month.
+    """
+    result: dict[date, DailyFuturesOI] = {}
+    for td in week.trading_days:
+        date_str = td.strftime("%Y%m%d")
+        cache_key = f"daily_futures_oi_{date_str}"
+
+        if cache_key in _daily_futures_oi_cache:
+            records = _daily_futures_oi_cache[cache_key]
+        else:
+            content = fetcher.download_daily_oi_excel(td)
+            if content is None:
+                _daily_futures_oi_cache[cache_key] = []
+                continue
+            records = parse_daily_futures_oi_excel(content)
+            _daily_futures_oi_cache[cache_key] = records
+
+        for r in records:
+            if r.product == product and r.contract_month == contract_month:
+                result[td] = r
+                break
+
+    return result
 
 
 def _load_option_oi_raw(d: date) -> list[OptionParticipantOI]:

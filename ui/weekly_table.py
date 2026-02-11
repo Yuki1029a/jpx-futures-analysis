@@ -4,7 +4,7 @@ from __future__ import annotations
 import streamlit as st
 import pandas as pd
 import numpy as np
-from models import WeeklyParticipantRow, WeekDefinition
+from models import WeeklyParticipantRow, WeekDefinition, DailyFuturesOI
 import config
 
 
@@ -20,6 +20,7 @@ def render_weekly_table(
     show_oi: bool = True,
     tab_label: str = "",
     stats_20d: dict | None = None,
+    daily_futures_oi: dict | None = None,
 ) -> None:
     """Render the main weekly analysis table.
 
@@ -28,6 +29,7 @@ def render_weekly_table(
                  If False, show only daily volumes and weekly total (for session-specific tabs).
         tab_label: Label shown in subheader for session context.
         stats_20d: {participant_id: (avg, max)} - 20-day stats passed separately to avoid mutating cached rows.
+        daily_futures_oi: {date: DailyFuturesOI} - aggregate daily OI balance per trading day.
     """
     cm_label = f"20{contract_month[:2]}年{contract_month[2:]}月限" if contract_month else ""
     title = f"{config.PRODUCT_DISPLAY_NAMES.get(product, product)} {cm_label}  ({week.label})"
@@ -38,6 +40,10 @@ def render_weekly_table(
     if not rows:
         st.warning("選択された条件のデータがありません。")
         return
+
+    # Daily futures OI summary above the table
+    if daily_futures_oi:
+        _render_daily_oi_summary(week, daily_futures_oi)
 
     df = _build_display_dataframe(rows, week, show_oi, stats_20d)
     styled = _apply_table_styling(df, week, show_oi)
@@ -187,6 +193,35 @@ def _render_summary_stats(rows: list[WeeklyParticipantRow]) -> None:
     with cols[3]:
         delta_color = "normal" if total_net >= 0 else "inverse"
         st.metric("全体Net増減", f"{int(total_net):+,}", delta_color=delta_color)
+
+
+def _render_daily_oi_summary(
+    week: WeekDefinition,
+    daily_futures_oi: dict,
+) -> None:
+    """Render daily OI balance summary row aligned with trading days."""
+    days = week.trading_days
+    if not days:
+        return
+
+    cols = st.columns(len(days))
+    for col, td in zip(cols, days):
+        dow = _DOW_JP[td.weekday()]
+        oi_rec = daily_futures_oi.get(td)
+        with col:
+            if oi_rec:
+                chg = oi_rec.net_change
+                delta_str = f"{chg:+,}"
+                st.metric(
+                    label=f"{td.strftime('%m/%d')}({dow})",
+                    value=f"{oi_rec.current_oi:,}",
+                    delta=delta_str,
+                )
+            else:
+                st.metric(
+                    label=f"{td.strftime('%m/%d')}({dow})",
+                    value="-",
+                )
 
 
 def _direction_label(direction) -> str:
