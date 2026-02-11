@@ -73,12 +73,11 @@ OI_FAR_COLUMNS = {
     "long_volume": 18,    # R  買超
 }
 
-# --- Target Products ---
 # --- Daily OI Balance ---
 DAILY_OI_URL_TEMPLATE = (
     "https://www.jpx.co.jp/markets/derivatives/"
     "trading-volume/tvdivq00000014nn-att/"
-    "{yyyymmdd}open_interest_e.xlsx"
+    "{yyyymmdd}open_interest.xlsx"
 )
 
 # --- Target Products ---
