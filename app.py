@@ -14,6 +14,7 @@ from ui.sidebar import render_sidebar
 from ui.weekly_table import render_weekly_table
 from ui.charts import render_net_change_bar_chart, render_daily_volume_stacked
 from ui.option_strike_table import render_option_strike_table
+from ui.gex_chart import render_gex_section
 
 st.set_page_config(
     page_title="先物手口分析",
@@ -70,14 +71,17 @@ def main():
     opt_cm = selections["option_contract_month"]
     opt_pids = selections["option_participant_ids"]
 
-    # Top-level tabs: Futures vs Options
-    main_tab1, main_tab2 = st.tabs(["先物分析", "オプション分析"])
+    # Top-level tabs: Futures, Options, GEX
+    main_tab1, main_tab2, main_tab3 = st.tabs(["先物分析", "オプション分析", "GEX分析"])
 
     with main_tab1:
         _render_futures_section(product, week, contract_month)
 
     with main_tab2:
         _render_options_section(week, opt_cm, opt_pids)
+
+    with main_tab3:
+        _render_gex_section(week, opt_cm, opt_pids)
 
 
 def _render_futures_section(product, week, contract_month):
@@ -140,6 +144,26 @@ def _render_options_section(week, opt_cm, opt_pids):
                 continue
 
             render_option_strike_table(opt_rows, week, tab_label=label)
+
+
+def _render_gex_section(week, opt_cm, opt_pids):
+    """Render GEX analysis tab."""
+    if not opt_cm:
+        st.info("サイドバーでオプション限月を選択してください")
+        return
+
+    # Load option data (全セッション合計, no participant filter for aggregate OI)
+    with st.spinner("GEXデータ読み込み中..."):
+        opt_rows = _get_or_load_options(
+            week, opt_cm, "全セッション合計",
+            SESSION_MODES["全セッション合計"], opt_pids,
+        )
+
+    if not opt_rows:
+        st.info("オプションデータなし")
+        return
+
+    render_gex_section(opt_rows, week, opt_cm)
 
 
 if __name__ == "__main__":
