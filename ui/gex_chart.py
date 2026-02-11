@@ -79,6 +79,12 @@ def render_gex_section(
     # Per 100 yen: contracts * 100
     futures_per_100 = profile.total_net_gex * _MOVE / (spot * _FUTURES_MULT)
 
+    # --- Compute spot-axis flip point (GEX curve zero crossing) ---
+    flip_spot = _calc_spot_flip(
+        sorted(all_strikes), put_oi, call_oi,
+        float(spot), sq, as_of, sigma,
+    )
+
     # --- Summary metrics ---
     m1, m2, m3, m4 = st.columns(4)
     with m1:
@@ -88,8 +94,8 @@ def render_gex_section(
     with m3:
         st.metric("PUT GEX /100円", f"{put_100:+,.0f} 億円")
     with m4:
-        if profile.flip_point:
-            st.metric("フリップ", f"{profile.flip_point:,.0f}")
+        if flip_spot is not None:
+            st.metric("フリップ", f"{flip_spot:,.0f}")
         else:
             st.metric("フリップ", "N/A")
 
@@ -114,6 +120,37 @@ def render_gex_section(
         sorted(all_strikes), put_oi, call_oi,
         float(spot), sq, as_of, sigma,
     )
+
+
+def _calc_spot_flip(
+    strikes: list[int],
+    put_oi: dict[int, int],
+    call_oi: dict[int, int],
+    spot: float,
+    sq: date,
+    as_of: date,
+    sigma: float,
+) -> float | None:
+    """Find the spot price where total Net GEX crosses zero (nearest to current spot)."""
+    import numpy as np
+    spots, _, surface = calc_gex_surface(
+        strikes=strikes, put_oi=put_oi, call_oi=call_oi,
+        spot_center=spot, spot_range=5000.0, spot_step=50.0,
+        expiry_date=sq, as_of=as_of, sigma=sigma,
+    )
+    total = surface.sum(axis=1)  # net GEX per spot level
+
+    best_flip = None
+    best_dist = float("inf")
+    for i in range(len(total) - 1):
+        if total[i] * total[i + 1] < 0:
+            frac = abs(total[i]) / (abs(total[i]) + abs(total[i + 1]))
+            flip = spots[i] + frac * (spots[i + 1] - spots[i])
+            dist = abs(flip - spot)
+            if dist < best_dist:
+                best_dist = dist
+                best_flip = float(flip)
+    return best_flip
 
 
 def _extract_latest_oi(
