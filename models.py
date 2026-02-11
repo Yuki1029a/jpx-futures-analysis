@@ -90,6 +90,19 @@ class OptionParticipantVolume:
 
 
 @dataclass
+class DailyOIBalance:
+    """Aggregate daily open interest balance for one strike (not per-participant)."""
+    report_date: date
+    contract_month: str         # YYMM, e.g. "2603"
+    option_type: str            # "PUT" or "CALL"
+    strike_price: int
+    trading_volume: int
+    current_oi: int             # Current day open interest
+    net_change: int             # Change from previous day
+    previous_oi: int            # Previous day open interest
+
+
+@dataclass
 class OptionStrikeRow:
     """Aggregated weekly data for one strike price, used for display."""
     strike_price: int
@@ -110,3 +123,8 @@ class OptionStrikeRow:
     # Per-participant breakdown: {date: [(name, volume), ...]} sorted by volume desc
     put_daily_breakdown: dict = field(default_factory=dict)
     call_daily_breakdown: dict = field(default_factory=dict)
+    # Daily OI balance (aggregate, not per-participant)
+    put_daily_oi: dict = field(default_factory=dict)        # {date: current_oi}
+    put_daily_oi_change: dict = field(default_factory=dict) # {date: net_change}
+    call_daily_oi: dict = field(default_factory=dict)       # {date: current_oi}
+    call_daily_oi_change: dict = field(default_factory=dict) # {date: net_change}

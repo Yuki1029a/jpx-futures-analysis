@@ -50,7 +50,7 @@ def _get_or_load(product, contract_month, week, sk_str, session_keys):
 def _get_or_load_options(week, contract_month, sk_str, session_keys, participant_ids):
     """Load option data using session_state as cache."""
     pid_str = ",".join(sorted(participant_ids)) if participant_ids is not None else "ALL"
-    key = f"opt_rows|{week.label}|{contract_month}|{sk_str}|{pid_str}"
+    key = f"opt_rows_v2|{week.label}|{contract_month}|{sk_str}|{pid_str}"
     if key not in st.session_state:
         st.session_state[key] = load_option_weekly_data(
             week,

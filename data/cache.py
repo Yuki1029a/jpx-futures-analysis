@@ -20,7 +20,8 @@ from data.r2_storage import r2_get, r2_put
 
 def ensure_cache_dirs() -> None:
     """Create cache directory structure if it doesn't exist."""
-    for d in [config.CACHE_VOLUME_DIR, config.CACHE_OI_DIR, config.CACHE_INDEX_DIR]:
+    for d in [config.CACHE_VOLUME_DIR, config.CACHE_OI_DIR, config.CACHE_INDEX_DIR,
+              config.CACHE_DAILY_OI_DIR]:
         d.mkdir(parents=True, exist_ok=True)
 
 

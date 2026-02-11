@@ -1,9 +1,13 @@
 """Fetch JSON indexes and Excel files from JPX website."""
 from __future__ import annotations
 
+import logging
 import requests
+from datetime import date
 from pathlib import Path
 import config
+
+logger = logging.getLogger(__name__)
 from data.cache import (
     ensure_cache_dirs, get_cached_bytes, save_to_cache,
     get_cached_json, save_json_to_cache,
@@ -85,3 +89,23 @@ def download_oi_excel(file_path: str) -> bytes:
     """Download a weekly OI Excel file given its relative path."""
     url = config.JPX_BASE_URL + file_path
     return fetch_excel(url, config.CACHE_OI_DIR)
+
+
+def download_daily_oi_excel(trade_date: date) -> bytes | None:
+    """Download daily OI balance Excel for a specific date.
+
+    Returns bytes on success, None if file doesn't exist (HTTP 404).
+    Uses English version for consistent parsing.
+    """
+    date_str = trade_date.strftime("%Y%m%d")
+    url = config.DAILY_OI_URL_TEMPLATE.replace("{yyyymmdd}", date_str)
+    try:
+        return fetch_excel(url, config.CACHE_DAILY_OI_DIR, cache_hours=168.0)
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            logger.debug("Daily OI file not found for %s", trade_date)
+            return None
+        raise
+    except Exception:
+        logger.warning("Failed to fetch daily OI for %s", trade_date, exc_info=True)
+        return None

@@ -8,6 +8,7 @@ CACHE_DIR = PROJECT_ROOT / "cache"
 CACHE_VOLUME_DIR = CACHE_DIR / "volume"
 CACHE_OI_DIR = CACHE_DIR / "oi"
 CACHE_INDEX_DIR = CACHE_DIR / "index"
+CACHE_DAILY_OI_DIR = CACHE_DIR / "daily_oi"
 
 # --- JPX API Base ---
 JPX_BASE_URL = "https://www.jpx.co.jp"
@@ -71,6 +72,14 @@ OI_FAR_COLUMNS = {
     "long_name_jp": 17,   # Q  買超
     "long_volume": 18,    # R  買超
 }
+
+# --- Target Products ---
+# --- Daily OI Balance ---
+DAILY_OI_URL_TEMPLATE = (
+    "https://www.jpx.co.jp/markets/derivatives/"
+    "trading-volume/tvdivq00000014nn-att/"
+    "{yyyymmdd}open_interest_e.xlsx"
+)
 
 # --- Target Products ---
 TARGET_PRODUCTS = ["NK225F", "TOPIXF"]

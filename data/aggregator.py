@@ -13,6 +13,7 @@ from models import (
     ParticipantVolume, ParticipantOI,
     WeekDefinition, WeeklyParticipantRow,
     OptionParticipantOI, OptionParticipantVolume, OptionStrikeRow,
+    DailyOIBalance,
 )
 from data import fetcher
 from data.parser_volume import (
@@ -21,6 +22,7 @@ from data.parser_volume import (
 )
 from data.parser_oi import parse_oi_excel
 from data.parser_option_oi import parse_option_oi_excel
+from data.parser_daily_oi import parse_daily_oi_excel
 import config
 
 
@@ -505,6 +507,13 @@ def get_available_option_contract_months(
         if oi_months:
             break
 
+    # Also check daily OI balance files for additional contract months
+    if week.trading_days:
+        daily_records = _load_daily_oi_for_date(week.trading_days[-1])
+        for r in daily_records:
+            if r.contract_month:
+                oi_months.add(r.contract_month)
+
     if oi_months:
         return sorted(oi_months)
 
@@ -591,8 +600,44 @@ def load_option_weekly_data(
             records = [r for r in records if r.participant_id in pid_set]
         daily_vols[td] = records
 
+    # 2.5 Load daily OI balance (aggregate, not per-participant)
+    daily_oi: dict[date, list[DailyOIBalance]] = {}
+    for td in week.trading_days:
+        oi_records = _load_daily_oi_for_date(td, contract_month)
+        daily_oi[td] = oi_records
+
     # 3. Aggregate by strike
-    return _aggregate_by_strike(start_oi, end_oi, daily_vols, week)
+    return _aggregate_by_strike(start_oi, end_oi, daily_vols, week, daily_oi)
+
+
+_daily_oi_parse_cache: dict[str, list[DailyOIBalance]] = {}
+
+
+def _load_daily_oi_for_date(
+    trade_date: date,
+    contract_month: str = "",
+) -> list[DailyOIBalance]:
+    """Load daily OI balance records for a specific date.
+
+    Aggregate per-strike data (not per-participant).
+    No night session shifting needed (single daily file).
+    """
+    date_str = trade_date.strftime("%Y%m%d")
+    cache_key = f"daily_oi_{date_str}"
+
+    if cache_key in _daily_oi_parse_cache:
+        records = _daily_oi_parse_cache[cache_key]
+    else:
+        content = fetcher.download_daily_oi_excel(trade_date)
+        if content is None:
+            _daily_oi_parse_cache[cache_key] = []
+            return []
+        records = parse_daily_oi_excel(content)
+        _daily_oi_parse_cache[cache_key] = records
+
+    if contract_month:
+        records = [r for r in records if r.contract_month == contract_month]
+    return records
 
 
 def _load_option_oi_raw(d: date) -> list[OptionParticipantOI]:
@@ -735,11 +780,13 @@ def _aggregate_by_strike(
     end_oi: dict[tuple[str, int], tuple[float, float]],
     daily_vols: dict[date, list[OptionParticipantVolume]],
     week: WeekDefinition,
+    daily_oi: dict[date, list[DailyOIBalance]] | None = None,
 ) -> list[OptionStrikeRow]:
     """Aggregate all data into OptionStrikeRow per strike price.
 
     Each row contains all-participant totals for PUT and CALL.
     OI values are (total_long, total_short) tuples.
+    daily_oi: per-date aggregate OI balance (not per-participant).
     """
     # Collect all strikes
     all_strikes: set[int] = set()
@@ -750,6 +797,10 @@ def _aggregate_by_strike(
     for day_records in daily_vols.values():
         for r in day_records:
             all_strikes.add(r.strike_price)
+    if daily_oi:
+        for day_records in daily_oi.values():
+            for r in day_records:
+                all_strikes.add(r.strike_price)
 
     # Build volume aggregation: (date, type, strike) -> total volume
     vol_agg: dict[tuple[date, str, int], float] = {}
@@ -766,6 +817,13 @@ def _aggregate_by_strike(
     for key in vol_detail:
         vol_detail[key].sort(key=lambda x: -x[1])
 
+    # Build daily OI balance lookup: (date, type, strike) -> DailyOIBalance
+    oi_bal_lookup: dict[tuple[date, str, int], DailyOIBalance] = {}
+    if daily_oi:
+        for td, records in daily_oi.items():
+            for r in records:
+                oi_bal_lookup[(td, r.option_type, r.strike_price)] = r
+
     rows = []
     for strike in sorted(all_strikes, reverse=True):
         put_daily = {}
@@ -774,6 +832,10 @@ def _aggregate_by_strike(
         call_total = 0.0
         put_breakdown = {}
         call_breakdown = {}
+        put_doi = {}
+        put_doi_chg = {}
+        call_doi = {}
+        call_doi_chg = {}
 
         for td in week.trading_days:
             pv = vol_agg.get((td, "PUT", strike), 0)
@@ -786,6 +848,16 @@ def _aggregate_by_strike(
                 call_daily[td] = cv
                 call_total += cv
                 call_breakdown[td] = vol_detail.get((td, "CALL", strike), [])
+
+            # Daily OI balance
+            p_bal = oi_bal_lookup.get((td, "PUT", strike))
+            if p_bal:
+                put_doi[td] = p_bal.current_oi
+                put_doi_chg[td] = p_bal.net_change
+            c_bal = oi_bal_lookup.get((td, "CALL", strike))
+            if c_bal:
+                call_doi[td] = c_bal.current_oi
+                call_doi_chg[td] = c_bal.net_change
 
         ps = start_oi.get(("PUT", strike))  # (long, short) or None
         pe = end_oi.get(("PUT", strike))
@@ -808,6 +880,10 @@ def _aggregate_by_strike(
             call_week_total=call_total if call_total > 0 else None,
             put_daily_breakdown=put_breakdown,
             call_daily_breakdown=call_breakdown,
+            put_daily_oi=put_doi,
+            put_daily_oi_change=put_doi_chg,
+            call_daily_oi=call_doi,
+            call_daily_oi_change=call_doi_chg,
         ))
 
     return rows
