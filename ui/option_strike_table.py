@@ -1,7 +1,9 @@
-"""Option strike-price table with single-row layout and breakdown panel.
+"""Option strike-price table with single-row layout, OI bar charts, and breakdown panel.
 
-Each strike = one DataFrame row showing participant-filtered daily volumes + weekly OI.
-Daily OI balance data is shown in the right detail panel on cell click.
+Each strike = one DataFrame row showing:
+  - Participant-filtered daily volumes (NumberColumn)
+  - Daily OI bar charts [current_oi, previous_oi] (BarChartColumn)
+  - Weekly OI long/short
 
 Layout: left = main table (clickable, sortable), right = detail panel.
 """
@@ -30,12 +32,30 @@ def render_option_strike_table(
         st.warning("オプションデータがありません。")
         return
 
-    df = _build_display_dataframe(rows, week)
+    # OI bar toggle
+    show_oi_bars = st.checkbox("建玉バー表示", value=True, key=f"oi_bar_{tab_label}")
+
+    # Compute max OI for consistent bar scaling
+    max_oi = 1
+    if show_oi_bars:
+        for row in rows:
+            for v in row.put_daily_oi.values():
+                if v and v > max_oi:
+                    max_oi = v
+            for v in row.call_daily_oi.values():
+                if v and v > max_oi:
+                    max_oi = v
+
+    df = _build_display_dataframe(rows, week, show_oi_bars)
     put_day_cols = [_day_col(td, "P") for td in week.trading_days]
     call_day_cols = [_day_col(td, "C") for td in reversed(week.trading_days)]
+    put_oi_cols = [_oi_col(td, "P") for td in week.trading_days] if show_oi_bars else []
+    call_oi_cols = [_oi_col(td, "C") for td in reversed(week.trading_days)] if show_oi_bars else []
 
     # Column config
-    col_config = _build_column_config(df, put_day_cols, call_day_cols)
+    col_config = _build_column_config(
+        df, put_day_cols, call_day_cols, put_oi_cols, call_oi_cols, max_oi,
+    )
 
     # Hide metadata column
     col_config["_strike_idx"] = None
@@ -60,6 +80,9 @@ def render_option_strike_table(
     selected_date = None
     selected_type = None
 
+    all_put_cols = set(put_day_cols) | set(put_oi_cols)
+    all_call_cols = set(call_day_cols) | set(call_oi_cols)
+
     if event and event.selection and event.selection.cells:
         cell = event.selection.cells[0]
         df_row_idx = cell[0]
@@ -70,12 +93,12 @@ def render_option_strike_table(
             if strike_idx_val is not None:
                 selected_strike_idx = int(strike_idx_val)
 
-            if col_name in put_day_cols:
+            if col_name in all_put_cols:
                 selected_type = "PUT"
-                selected_date = _col_to_date(col_name, week)
-            elif col_name in call_day_cols:
+                selected_date = _any_col_to_date(col_name, week)
+            elif col_name in all_call_cols:
                 selected_type = "CALL"
-                selected_date = _col_to_date(col_name, week)
+                selected_date = _any_col_to_date(col_name, week)
             elif col_name.startswith("P"):
                 selected_type = "PUT"
             elif col_name.startswith("C"):
@@ -93,14 +116,20 @@ def render_option_strike_table(
 
 # --- Helpers ---
 
-def _day_col(td, prefix: str) -> str:
+def _day_col(td: date, prefix: str) -> str:
     dow = _DOW_JP[td.weekday()]
     return f"{prefix}{td.strftime('%m/%d')}({dow})"
 
 
-def _col_to_date(col_name: str, week: WeekDefinition) -> date | None:
+def _oi_col(td: date, prefix: str) -> str:
+    return f"{prefix}建{td.strftime('%d')}"
+
+
+def _any_col_to_date(col_name: str, week: WeekDefinition) -> date | None:
+    """Resolve a volume or OI column name to a date."""
     for td in week.trading_days:
-        if _day_col(td, "P") == col_name or _day_col(td, "C") == col_name:
+        if (_day_col(td, "P") == col_name or _day_col(td, "C") == col_name
+                or _oi_col(td, "P") == col_name or _oi_col(td, "C") == col_name):
             return td
     return None
 
@@ -109,6 +138,9 @@ def _build_column_config(
     df: pd.DataFrame,
     put_day_cols: list[str],
     call_day_cols: list[str],
+    put_oi_cols: list[str],
+    call_oi_cols: list[str],
+    max_oi: int,
 ) -> dict:
     """Build column_config for formatting."""
     oi_cols = ["P前週L", "P前週S", "P今週L", "P今週S",
@@ -123,12 +155,23 @@ def _build_column_config(
 
     col_config["行使価格"] = st.column_config.NumberColumn("行使価格", format="%d")
 
+    # BarChartColumn for OI bars
+    for col in put_oi_cols + call_oi_cols:
+        if col in df.columns:
+            col_config[col] = st.column_config.BarChartColumn(
+                col,
+                width="small",
+                y_min=0,
+                y_max=max_oi,
+            )
+
     return col_config
 
 
 def _build_display_dataframe(
     rows: list[OptionStrikeRow],
     week: WeekDefinition,
+    show_oi_bars: bool = True,
 ) -> pd.DataFrame:
     """Build DataFrame with one row per strike.
 
@@ -137,7 +180,7 @@ def _build_display_dataframe(
     records = []
 
     for idx, row in enumerate(rows):
-        rec = _build_volume_row(row, week)
+        rec = _build_volume_row(row, week, show_oi_bars)
         rec["行使価格"] = row.strike_price
         rec["_strike_idx"] = idx
         records.append(rec)
@@ -145,14 +188,26 @@ def _build_display_dataframe(
     return pd.DataFrame(records)
 
 
-def _build_volume_row(row: OptionStrikeRow, week: WeekDefinition) -> dict:
-    """Build the volume row for a strike."""
+def _build_volume_row(
+    row: OptionStrikeRow,
+    week: WeekDefinition,
+    show_oi_bars: bool = True,
+) -> dict:
+    """Build the volume row for a strike, optionally with OI bar data."""
     rec = {}
     rec["P前週L"] = row.put_start_oi_long
     rec["P前週S"] = row.put_start_oi_short
 
     for td in week.trading_days:
         rec[_day_col(td, "P")] = row.put_daily_volumes.get(td) or None
+        if show_oi_bars:
+            curr = row.put_daily_oi.get(td)
+            if curr is not None:
+                chg = row.put_daily_oi_change.get(td, 0)
+                prev = curr - chg if chg else curr
+                rec[_oi_col(td, "P")] = [curr, prev]
+            else:
+                rec[_oi_col(td, "P")] = None
 
     rec["P計"] = row.put_week_total
     rec["P今週L"] = row.put_end_oi_long
@@ -164,6 +219,14 @@ def _build_volume_row(row: OptionStrikeRow, week: WeekDefinition) -> dict:
 
     for td in reversed(week.trading_days):
         rec[_day_col(td, "C")] = row.call_daily_volumes.get(td) or None
+        if show_oi_bars:
+            curr = row.call_daily_oi.get(td)
+            if curr is not None:
+                chg = row.call_daily_oi_change.get(td, 0)
+                prev = curr - chg if chg else curr
+                rec[_oi_col(td, "C")] = [curr, prev]
+            else:
+                rec[_oi_col(td, "C")] = None
 
     rec["C前週L"] = row.call_start_oi_long
     rec["C前週S"] = row.call_start_oi_short

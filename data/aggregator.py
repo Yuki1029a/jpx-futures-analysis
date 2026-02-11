@@ -824,6 +824,26 @@ def _aggregate_by_strike(
             for r in records:
                 oi_bal_lookup[(td, r.option_type, r.strike_price)] = r
 
+        # Derive previous day's OI from current day's previous_oi field
+        trading_day_set = set(week.trading_days)
+        for td, records in daily_oi.items():
+            prev_td = _get_prev_trading_date(td)
+            if prev_td is None or prev_td not in trading_day_set:
+                continue
+            for r in records:
+                prev_key = (prev_td, r.option_type, r.strike_price)
+                if prev_key not in oi_bal_lookup:
+                    oi_bal_lookup[prev_key] = DailyOIBalance(
+                        report_date=prev_td,
+                        contract_month=r.contract_month,
+                        option_type=r.option_type,
+                        strike_price=r.strike_price,
+                        trading_volume=0,
+                        current_oi=r.previous_oi,
+                        net_change=0,
+                        previous_oi=0,
+                    )
+
     rows = []
     for strike in sorted(all_strikes, reverse=True):
         put_daily = {}
