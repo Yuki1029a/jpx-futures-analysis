@@ -1,10 +1,9 @@
-"""Option strike-price table with two-row layout and breakdown panel.
+"""Option strike-price table with single-row layout and breakdown panel.
 
-Each strike has two DataFrame rows:
-  Row 1 (出来高): participant-filtered daily volumes + weekly OI
-  Row 2 (建玉):   daily aggregate OI balance + net change
+Each strike = one DataFrame row showing participant-filtered daily volumes + weekly OI.
+Daily OI balance data is shown in the right detail panel on cell click.
 
-Layout: left = main table (clickable), right = detail panel.
+Layout: left = main table (clickable, sortable), right = detail panel.
 """
 from __future__ import annotations
 
@@ -31,16 +30,15 @@ def render_option_strike_table(
         st.warning("オプションデータがありません。")
         return
 
-    df, row_meta = _build_display_dataframe(rows, week)
+    df = _build_display_dataframe(rows, week)
     put_day_cols = [_day_col(td, "P") for td in week.trading_days]
     call_day_cols = [_day_col(td, "C") for td in reversed(week.trading_days)]
 
     # Column config
     col_config = _build_column_config(df, put_day_cols, call_day_cols)
 
-    # Hide metadata columns
+    # Hide metadata column
     col_config["_strike_idx"] = None
-    col_config["_row_type"] = None
 
     # Layout: table (left 75%) | detail (right 25%)
     left_col, right_col = st.columns([3, 1])
@@ -61,17 +59,16 @@ def render_option_strike_table(
     selected_strike_idx = None
     selected_date = None
     selected_type = None
-    selected_row_type = None  # "volume" or "daily_oi"
 
     if event and event.selection and event.selection.cells:
         cell = event.selection.cells[0]
         df_row_idx = cell[0]
         col_name = cell[1]
 
-        if 0 <= df_row_idx < len(row_meta):
-            meta = row_meta[df_row_idx]
-            selected_strike_idx = meta["strike_idx"]
-            selected_row_type = meta["row_type"]
+        if 0 <= df_row_idx < len(df):
+            strike_idx_val = df.iloc[df_row_idx].get("_strike_idx")
+            if strike_idx_val is not None:
+                selected_strike_idx = int(strike_idx_val)
 
             if col_name in put_day_cols:
                 selected_type = "PUT"
@@ -87,7 +84,7 @@ def render_option_strike_table(
     with right_col:
         _render_detail_panel(
             rows, week,
-            selected_strike_idx, selected_date, selected_type, selected_row_type,
+            selected_strike_idx, selected_date, selected_type,
             tab_label,
         )
 
@@ -124,8 +121,7 @@ def _build_column_config(
         if col in df.columns:
             col_config[col] = st.column_config.NumberColumn(col, format="%d")
 
-    # 行使価格 is now a string column (strike number or "建玉")
-    col_config["行使価格"] = st.column_config.TextColumn("行使価格", width="small")
+    col_config["行使価格"] = st.column_config.NumberColumn("行使価格", format="%d")
 
     return col_config
 
@@ -133,38 +129,24 @@ def _build_column_config(
 def _build_display_dataframe(
     rows: list[OptionStrikeRow],
     week: WeekDefinition,
-) -> tuple[pd.DataFrame, list[dict]]:
-    """Build DataFrame with two rows per strike.
+) -> pd.DataFrame:
+    """Build DataFrame with one row per strike.
 
-    Returns (DataFrame, row_meta) where row_meta[i] = {"strike_idx": int, "row_type": str}.
+    Returns DataFrame with _strike_idx metadata column.
     """
     records = []
-    row_meta = []
 
     for idx, row in enumerate(rows):
-        # --- Row 1: Volume (participant-filtered) ---
-        rec1 = _build_volume_row(row, week)
-        rec1["行使価格"] = f"{row.strike_price:,}"
-        rec1["_strike_idx"] = idx
-        rec1["_row_type"] = "volume"
-        records.append(rec1)
-        row_meta.append({"strike_idx": idx, "row_type": "volume"})
+        rec = _build_volume_row(row, week)
+        rec["行使価格"] = row.strike_price
+        rec["_strike_idx"] = idx
+        records.append(rec)
 
-        # --- Row 2: Daily OI balance ---
-        has_daily_oi = bool(row.put_daily_oi or row.call_daily_oi)
-        if has_daily_oi:
-            rec2 = _build_daily_oi_row(row, week)
-            rec2["行使価格"] = "建玉"
-            rec2["_strike_idx"] = idx
-            rec2["_row_type"] = "daily_oi"
-            records.append(rec2)
-            row_meta.append({"strike_idx": idx, "row_type": "daily_oi"})
-
-    return pd.DataFrame(records), row_meta
+    return pd.DataFrame(records)
 
 
 def _build_volume_row(row: OptionStrikeRow, week: WeekDefinition) -> dict:
-    """Build the volume (top) row for a strike."""
+    """Build the volume row for a strike."""
     rec = {}
     rec["P前週L"] = row.put_start_oi_long
     rec["P前週S"] = row.put_start_oi_short
@@ -189,44 +171,15 @@ def _build_volume_row(row: OptionStrikeRow, week: WeekDefinition) -> dict:
     return rec
 
 
-def _build_daily_oi_row(row: OptionStrikeRow, week: WeekDefinition) -> dict:
-    """Build the daily OI (bottom) row for a strike."""
-    rec = {}
-
-    # OI columns blank for daily OI row
-    rec["P前週L"] = None
-    rec["P前週S"] = None
-
-    for td in week.trading_days:
-        rec[_day_col(td, "P")] = row.put_daily_oi.get(td) or None
-
-    rec["P計"] = None
-    rec["P今週L"] = None
-    rec["P今週S"] = None
-
-    rec["C今週L"] = None
-    rec["C今週S"] = None
-    rec["C計"] = None
-
-    for td in reversed(week.trading_days):
-        rec[_day_col(td, "C")] = row.call_daily_oi.get(td) or None
-
-    rec["C前週L"] = None
-    rec["C前週S"] = None
-
-    return rec
-
-
 def _render_detail_panel(
     rows: list[OptionStrikeRow],
     week: WeekDefinition,
     strike_idx: int | None,
     selected_date: date | None,
     selected_type: str | None,
-    row_type: str | None,
     tab_label: str,
 ) -> None:
-    """Right panel: show details for selected cell."""
+    """Right panel: show participant breakdown + daily OI for selected cell."""
     st.markdown("**詳細パネル**")
 
     if strike_idx is None or strike_idx >= len(rows):
@@ -252,16 +205,11 @@ def _render_detail_panel(
     dow = _DOW_JP[selected_date.weekday()]
     date_str = f"{selected_date.strftime('%m/%d')}({dow})"
 
-    if row_type == "daily_oi":
-        # Show daily OI balance detail
-        _render_oi_detail(target_row, selected_type, selected_date, date_str)
-    else:
-        # Show participant breakdown (default)
-        _render_participant_breakdown(target_row, selected_type, selected_date, date_str)
+    # 1) Participant breakdown
+    _render_participant_breakdown(target_row, selected_type, selected_date, date_str)
 
-    # Always show daily OI summary if available
-    if row_type != "daily_oi":
-        _render_oi_summary_line(target_row, selected_type, selected_date)
+    # 2) Daily OI balance (always shown below breakdown if data exists)
+    _render_oi_detail(target_row, selected_type, selected_date)
 
 
 def _render_participant_breakdown(
@@ -300,45 +248,22 @@ def _render_oi_detail(
     row: OptionStrikeRow,
     option_type: str,
     td: date,
-    date_str: str,
 ) -> None:
-    """Show daily OI balance detail for selected cell."""
+    """Show daily OI balance detail below participant breakdown."""
     is_put = option_type == "PUT"
     oi = (row.put_daily_oi if is_put else row.call_daily_oi).get(td)
     chg = (row.put_daily_oi_change if is_put else row.call_daily_oi_change).get(td)
 
-    header = f"{option_type} {row.strike_price:,}  {date_str}"
-    st.markdown(f"**{header}**")
-
     if oi is None:
-        st.caption("建玉データなし")
         return
 
+    st.markdown("---")
     prev = oi - chg if chg is not None else None
     chg_display = f"+{chg:,}" if chg and chg > 0 else f"{chg:,}" if chg else "0"
 
-    st.metric("当日建玉", f"{oi:,}", delta=chg_display)
+    st.metric("建玉残高", f"{oi:,}", delta=chg_display)
     if prev is not None:
-        st.caption(f"前日建玉: {prev:,}")
-
-    # Also show the daily volume from participant data
-    vol = (row.put_daily_volumes if is_put else row.call_daily_volumes).get(td)
-    if vol:
-        st.caption(f"当日出来高: {int(vol):,}枚")
-
-
-def _render_oi_summary_line(
-    row: OptionStrikeRow,
-    option_type: str,
-    td: date,
-) -> None:
-    """Show a compact OI summary below participant breakdown."""
-    is_put = option_type == "PUT"
-    oi = (row.put_daily_oi if is_put else row.call_daily_oi).get(td)
-    chg = (row.put_daily_oi_change if is_put else row.call_daily_oi_change).get(td)
-    if oi is not None:
-        chg_str = f"({chg:+,})" if chg else ""
-        st.caption(f"建玉: {oi:,} {chg_str}")
+        st.caption(f"前日残高: {prev:,}")
 
 
 def _render_option_summary(rows: list[OptionStrikeRow]) -> None:
