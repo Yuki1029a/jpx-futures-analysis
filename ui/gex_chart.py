@@ -206,8 +206,14 @@ def _render_gex_3d_surface(
     as_of: date,
     sigma: float,
 ) -> None:
-    """Render 3D surface: X=strike, Y=spot range, Z=Net GEX."""
+    """Render 3D surface: X=spot range, Y=strike, Z=Net GEX contribution.
+
+    Each point shows: when underlying is at X, how much GEX does the
+    option at strike Y contribute?  This makes the strike axis a
+    spatial layout of where the gamma exposure *comes from*.
+    """
     st.subheader("GEX 3Dサーフェス")
+    st.caption("各行使価格のオプションが、原資産価格に応じてどれだけのGEXをもたらすか")
 
     spot_range = st.slider(
         "原資産レンジ (±円)", 1000, 5000, 3000, step=500,
@@ -227,24 +233,27 @@ def _render_gex_3d_surface(
     )
 
     # Scale to per-100-yen move in 億円
+    # surface shape: (len(spots), len(strikes))
     z_data = surface * _MOVE / _OKU
 
     fig = go.Figure()
 
+    # Surface: X=spot (原資産), Y=strike (行使価格), Z=GEX寄与
+    # Transpose so rows=strikes, cols=spots → x=spots, y=strikes
     fig.add_trace(go.Surface(
-        x=strike_arr,
-        y=spots,
-        z=z_data,
+        x=spots,               # 原資産価格レンジ
+        y=strike_arr,          # 行使価格 (GEXの発生源)
+        z=z_data.T,            # transposed: (strikes, spots)
         colorscale="RdYlGn",
-        colorbar=dict(title="Net GEX<br>(億円/100円)"),
+        colorbar=dict(title="GEX寄与<br>(億円/100円)"),
         opacity=0.9,
     ))
 
-    # Current spot marker line across all strikes
+    # Current spot vertical plane marker
     spot_idx = int(len(spots) // 2)
     fig.add_trace(go.Scatter3d(
-        x=strike_arr,
-        y=[spot] * len(strike_arr),
+        x=[spot] * len(strike_arr),
+        y=strike_arr,
         z=z_data[spot_idx, :],
         mode="lines",
         line=dict(color="blue", width=5),
@@ -253,14 +262,17 @@ def _render_gex_3d_surface(
 
     fig.update_layout(
         scene=dict(
-            xaxis_title="行使価格",
-            yaxis_title="原資産価格",
-            zaxis_title="Net GEX (億円/100円)",
+            xaxis_title="原資産価格",
+            yaxis_title="行使価格 (GEX発生源)",
+            zaxis_title="GEX寄与 (億円/100円)",
+            camera=dict(
+                eye=dict(x=1.5, y=-1.8, z=0.8),
+            ),
         ),
         height=650,
         margin=dict(l=0, r=0, t=30, b=0),
     )
 
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("赤=負ガンマ (ディーラーショート), 緑=正ガンマ (ディーラーロング)  |  "
-               "青線=現在の原資産価格")
+    st.caption("Y軸=行使価格 (そのstrikeのオプションがGEXをもたらす位置)  |  "
+               "X軸=原資産が動いたときの変化  |  青線=現在値")
