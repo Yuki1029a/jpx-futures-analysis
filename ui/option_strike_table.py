@@ -1,13 +1,13 @@
-"""Option strike-price table visualization with cell click breakdown.
+"""Option strike-price table visualization with participant breakdown.
 
 Layout:
-  PUT側（左）                                   | CALL側（右）
-  前週L|前週S|1/6 1/7 ... |合計|今週L|今週S| 行使価格 |今週L|今週S|合計| ... 1/7 1/6|前週L|前週S
+  PUT side (left)                                 | CALL side (right)
+  前週L|前週S|1/6 1/7 ... |計|今週L|今週S| 行使価格 |今週L|今週S|計| ... 1/7 1/6|前週L|前週S
 
 - Strike prices sorted descending (high to low)
 - PUT daily columns: left-to-right (old -> new)
 - CALL daily columns: right-to-left (new -> old)
-- Click a daily volume cell to see per-participant breakdown
+- Breakdown selector below table for per-participant detail
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def render_option_strike_table(
     week: WeekDefinition,
     tab_label: str = "",
 ) -> None:
-    """Render the option strike-price table with cell-click breakdown."""
+    """Render the option strike-price table with styled colors and breakdown UI."""
     title = f"日経225オプション ({week.label})"
     if tab_label and tab_label != "全セッション合計":
         title += f"  [{tab_label}]"
@@ -35,53 +35,16 @@ def render_option_strike_table(
         return
 
     df = _build_display_dataframe(rows, week)
+    styled = _apply_styling(df, week)
 
-    # Build column config for integer formatting
-    col_config = {}
-    put_day_cols = [_day_col(td, "P") for td in week.trading_days]
-    call_day_cols = [_day_col(td, "C") for td in reversed(week.trading_days)]
-    num_cols = (
-        put_day_cols + call_day_cols
-        + ["P前週L", "P前週S", "P今週L", "P今週S",
-           "C前週L", "C前週S", "C今週L", "C今週S",
-           "P計", "C計"]
-    )
-    for col in num_cols:
-        if col in df.columns:
-            col_config[col] = st.column_config.NumberColumn(
-                col, format="%d",
-            )
-    col_config["行使価格"] = st.column_config.NumberColumn(
-        "行使価格", format="%d",
-    )
-
-    # Unique key per tab to avoid widget conflicts
-    table_key = f"opt_table_{tab_label}"
-
-    event = st.dataframe(
-        df,
+    st.dataframe(
+        styled,
         use_container_width=True,
         height=min(len(rows) * 35 + 60, 900),
-        on_select="rerun",
-        selection_mode="single-cell",
-        key=table_key,
-        column_config=col_config,
     )
 
-    # Handle cell selection -> show breakdown dialog
-    if event and event.selection and event.selection.cells:
-        cell = event.selection.cells[0]
-        # Streamlit versions return either dict {"row":…,"column":…} or tuple (row, col)
-        if isinstance(cell, dict):
-            row_idx = cell["row"]
-            col_name = cell["column"]
-        else:
-            row_idx = cell[0]
-            col_name = df.columns[cell[1]] if isinstance(cell[1], int) else cell[1]
-
-        # Only respond to daily volume columns (P02/05(月) or C02/05(月))
-        if col_name in put_day_cols or col_name in call_day_cols:
-            _show_breakdown(rows, week, row_idx, col_name, put_day_cols, call_day_cols)
+    # Breakdown selector
+    _render_breakdown_selector(rows, week, tab_label)
 
     _render_option_summary(rows)
 
@@ -91,45 +54,83 @@ def _day_col(td, prefix: str) -> str:
     return f"{prefix}{td.strftime('%m/%d')}({dow})"
 
 
-def _col_to_date(col_name: str, week: WeekDefinition) -> date | None:
-    """Extract date from column name like 'P02/05(月)' or 'C02/05(月)'."""
-    for td in week.trading_days:
-        if _day_col(td, "P") == col_name or _day_col(td, "C") == col_name:
-            return td
-    return None
+def _day_label(td) -> str:
+    dow = _DOW_JP[td.weekday()]
+    return f"{td.strftime('%m/%d')}({dow})"
 
 
-def _show_breakdown(
+def _render_breakdown_selector(
     rows: list[OptionStrikeRow],
     week: WeekDefinition,
-    row_idx: int,
-    col_name: str,
-    put_day_cols: list[str],
-    call_day_cols: list[str],
-):
-    """Show per-participant breakdown for selected cell."""
-    if row_idx < 0 or row_idx >= len(rows):
+    tab_label: str,
+) -> None:
+    """Render selectboxes to pick strike + date + put/call for breakdown."""
+    st.markdown("---")
+    st.markdown("**参加者別内訳**")
+
+    # Build lists of strikes that have breakdown data
+    strikes_with_data = []
+    for r in rows:
+        has_put = any(r.put_daily_breakdown.get(td) for td in week.trading_days)
+        has_call = any(r.call_daily_breakdown.get(td) for td in week.trading_days)
+        if has_put or has_call:
+            strikes_with_data.append(r.strike_price)
+
+    if not strikes_with_data:
+        st.caption("内訳データなし")
         return
 
-    row = rows[row_idx]
-    td = _col_to_date(col_name, week)
-    if td is None:
+    prefix = f"bd_{tab_label}"
+
+    col1, col2, col3 = st.columns([1, 1, 1])
+
+    with col1:
+        option_type = st.selectbox(
+            "種別",
+            ["CALL", "PUT"],
+            key=f"{prefix}_type",
+        )
+
+    with col2:
+        strike = st.selectbox(
+            "行使価格",
+            strikes_with_data,
+            key=f"{prefix}_strike",
+        )
+
+    day_labels = [_day_label(td) for td in week.trading_days]
+    with col3:
+        day_choice = st.selectbox(
+            "日付",
+            day_labels,
+            key=f"{prefix}_day",
+        )
+
+    # Find selected row + date
+    if strike is None or day_choice is None:
         return
 
-    is_put = col_name in put_day_cols
-    option_type = "PUT" if is_put else "CALL"
-    breakdown = (row.put_daily_breakdown if is_put else row.call_daily_breakdown).get(td, [])
+    day_idx = day_labels.index(day_choice)
+    td = week.trading_days[day_idx]
+
+    target_row = None
+    for r in rows:
+        if r.strike_price == strike:
+            target_row = r
+            break
+    if target_row is None:
+        return
+
+    is_put = option_type == "PUT"
+    breakdown = (target_row.put_daily_breakdown if is_put else target_row.call_daily_breakdown).get(td, [])
 
     if not breakdown:
+        st.caption(f"{option_type} {strike:,} / {day_choice}: データなし")
         return
 
-    dow = _DOW_JP[td.weekday()]
     total = sum(v for _, v in breakdown)
-
-    st.markdown("---")
     st.markdown(
-        f"**{option_type} {row.strike_price:,}  "
-        f"{td.strftime('%m/%d')}({dow})  "
+        f"**{option_type} {strike:,}  {day_choice}  "
         f"合計: {int(total):,}枚**"
     )
 
@@ -191,6 +192,54 @@ def _build_display_dataframe(
         records.append(rec)
 
     return pd.DataFrame(records)
+
+
+def _apply_styling(df: pd.DataFrame, week: WeekDefinition):
+    """Apply formatting and color styling."""
+    put_day_cols = [_day_col(td, "P") for td in week.trading_days]
+    call_day_cols = [_day_col(td, "C") for td in reversed(week.trading_days)]
+    oi_cols = ["P前週L", "P前週S", "P今週L", "P今週S",
+               "C前週L", "C前週S", "C今週L", "C今週S"]
+    total_cols = ["P計", "C計"]
+    num_cols = put_day_cols + call_day_cols + oi_cols + total_cols
+
+    fmt_int = lambda v: f"{int(v):,}" if pd.notna(v) else ""
+
+    styled = df.style
+
+    for col in df.columns:
+        if col in num_cols:
+            styled = styled.format(fmt_int, subset=[col])
+        elif col == "行使価格":
+            styled = styled.format(lambda v: f"{int(v):,}", subset=[col])
+
+    # Highlight strike column
+    def _strike_style(val):
+        return "font-weight: bold; background-color: #e8e8e8"
+
+    if "行使価格" in df.columns:
+        styled = styled.map(_strike_style, subset=["行使価格"])
+
+    # Color PUT columns with light red tint, CALL with light blue tint
+    def _put_bg(val):
+        if pd.notna(val) and val > 0:
+            return "background-color: #fff0f0"
+        return ""
+
+    def _call_bg(val):
+        if pd.notna(val) and val > 0:
+            return "background-color: #f0f0ff"
+        return ""
+
+    for col in put_day_cols + total_cols[:1]:
+        if col in df.columns:
+            styled = styled.map(_put_bg, subset=[col])
+
+    for col in call_day_cols + total_cols[1:]:
+        if col in df.columns:
+            styled = styled.map(_call_bg, subset=[col])
+
+    return styled
 
 
 def _render_option_summary(rows: list[OptionStrikeRow]) -> None:
