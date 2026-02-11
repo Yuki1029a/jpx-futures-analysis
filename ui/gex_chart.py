@@ -1,4 +1,8 @@
-"""GEX (Gamma Exposure) chart rendering."""
+"""GEX (Gamma Exposure) chart rendering.
+
+Display unit: hedge amount per 100-yen move in the underlying (in 億円).
+Also shows equivalent NK225 futures (large) contracts.
+"""
 from __future__ import annotations
 
 import streamlit as st
@@ -9,7 +13,9 @@ from models import OptionStrikeRow, WeekDefinition
 from utils.gex import calc_gex_profile, get_sq_date
 
 _DOW_JP = ["月", "火", "水", "木", "金", "土", "日"]
-_OKU = 1e8  # 1億円
+_OKU = 1e8          # 1億円
+_MOVE = 100          # 表示基準: 原資産100円変動
+_FUTURES_MULT = 1000 # 先物ラージ1枚 = 日経225 x 1000
 
 
 def render_gex_section(
@@ -48,7 +54,8 @@ def render_gex_section(
         return
 
     dow = _DOW_JP[as_of.weekday()]
-    st.caption(f"建玉基準日: {as_of.strftime('%Y/%m/%d')}({dow})")
+    st.caption(f"建玉基準日: {as_of.strftime('%Y/%m/%d')}({dow})  |  "
+               f"PUT OI計: {sum(put_oi.values()):,}枚  CALL OI計: {sum(call_oi.values()):,}枚")
 
     # --- Calculate ---
     profile = calc_gex_profile(
@@ -61,36 +68,49 @@ def render_gex_section(
         sigma=sigma,
     )
 
+    # Scale: per 100-yen move
+    net_100 = profile.total_net_gex * _MOVE / _OKU
+    call_100 = profile.total_call_gex * _MOVE / _OKU
+    put_100 = profile.total_put_gex * _MOVE / _OKU
+
+    # Futures equivalent: GEX per 1 yen / (spot * futures_mult) = contracts per 1 yen
+    # Per 100 yen: contracts * 100
+    futures_per_100 = profile.total_net_gex * _MOVE / (spot * _FUTURES_MULT)
+
     # --- Summary metrics ---
     m1, m2, m3, m4 = st.columns(4)
     with m1:
-        st.metric("Net GEX", f"{profile.total_net_gex / _OKU:+,.1f} 億円")
+        st.metric("Net GEX /100円", f"{net_100:+,.0f} 億円")
     with m2:
-        st.metric("CALL GEX", f"{profile.total_call_gex / _OKU:+,.1f} 億円")
+        st.metric("CALL GEX /100円", f"{call_100:+,.0f} 億円")
     with m3:
-        st.metric("PUT GEX", f"{profile.total_put_gex / _OKU:+,.1f} 億円")
+        st.metric("PUT GEX /100円", f"{put_100:+,.0f} 億円")
     with m4:
         if profile.flip_point:
             st.metric("フリップ", f"{profile.flip_point:,.0f}")
         else:
             st.metric("フリップ", "N/A")
 
+    # Sub-metrics
+    s1, s2 = st.columns(2)
+    with s1:
+        st.caption(f"先物ラージ換算 (100円変動時): {futures_per_100:+,.0f} 枚")
+    with s2:
+        days_to_sq = max((sq - as_of).days, 0)
+        st.caption(f"SQ残: {days_to_sq}日  |  IV: {iv_pct}%")
+
     # --- Chart ---
     _render_gex_bar_chart(profile.df, spot)
 
     # --- Detail table ---
     with st.expander("GEX詳細テーブル"):
-        _render_gex_table(profile.df)
+        _render_gex_table(profile.df, spot)
 
 
 def _extract_latest_oi(
     rows: list[OptionStrikeRow],
 ) -> tuple[date, dict[int, int], dict[int, int], set[int]]:
-    """Extract the latest available daily OI across all strikes.
-
-    Returns (as_of_date, put_oi_dict, call_oi_dict, all_strikes).
-    """
-    # Find the latest date that has OI data
+    """Extract the latest available daily OI across all strikes."""
     all_dates: set[date] = set()
     for r in rows:
         all_dates.update(r.put_daily_oi.keys())
@@ -118,14 +138,13 @@ def _extract_latest_oi(
 
 
 def _render_gex_bar_chart(df: pd.DataFrame, spot: float) -> None:
-    """Render GEX bar chart using st.bar_chart."""
+    """Render GEX bar chart. Values scaled to per-100-yen-move in 億円."""
     if df.empty:
         return
 
-    # Convert to 億円 for display
     chart_df = pd.DataFrame({
-        "CALL GEX": df["call_gex"].values / _OKU,
-        "PUT GEX": df["put_gex"].values / _OKU,
+        "CALL GEX": df["call_gex"].values * _MOVE / _OKU,
+        "PUT GEX": df["put_gex"].values * _MOVE / _OKU,
     }, index=df["strike"].apply(lambda x: f"{int(x):,}"))
 
     st.bar_chart(
@@ -134,18 +153,32 @@ def _render_gex_bar_chart(df: pd.DataFrame, spot: float) -> None:
         height=450,
     )
 
-    # Show spot line info
-    st.caption(f"原資産: {spot:,.0f}  |  緑=CALL GEX (正), 赤=PUT GEX (負)")
+    st.caption(f"原資産: {spot:,.0f}  |  単位: 億円 / 原資産100円変動  |  "
+               f"緑=CALL (正ガンマ), 赤=PUT (負ガンマ)")
 
 
-def _render_gex_table(df: pd.DataFrame) -> None:
-    """Show detailed GEX values per strike."""
+def _render_gex_table(df: pd.DataFrame, spot: float) -> None:
+    """Show detailed GEX values per strike (per 100 yen move)."""
     display = df.copy()
-    display["call_gex"] = (display["call_gex"] / _OKU).round(3)
-    display["put_gex"] = (display["put_gex"] / _OKU).round(3)
-    display["net_gex"] = (display["net_gex"] / _OKU).round(3)
-    display.columns = ["行使価格", "CALL GEX(億)", "PUT GEX(億)", "Net GEX(億)"]
+    display["call_gex"] = (display["call_gex"] * _MOVE / _OKU).round(1)
+    display["put_gex"] = (display["put_gex"] * _MOVE / _OKU).round(1)
+    display["net_gex"] = (display["net_gex"] * _MOVE / _OKU).round(1)
+    # Futures equivalent per strike
+    display["futures"] = (display["net_gex"] * _OKU / (spot * _FUTURES_MULT)).round(0).astype(int)
+    display = display.rename(columns={
+        "strike": "行使価格",
+        "call_gex": "CALL(億/100円)",
+        "put_gex": "PUT(億/100円)",
+        "net_gex": "Net(億/100円)",
+        "futures": "先物換算(枚)",
+    })
     display["行使価格"] = display["行使価格"].astype(int)
+
+    # Filter to strikes with meaningful GEX
+    display = display[
+        (display["CALL(億/100円)"].abs() >= 0.1) |
+        (display["PUT(億/100円)"].abs() >= 0.1)
+    ]
 
     st.dataframe(
         display,
