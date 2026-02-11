@@ -107,3 +107,6 @@ class OptionStrikeRow:
     call_end_oi_short: Optional[float] = None
     call_daily_volumes: dict = field(default_factory=dict)  # date -> total_volume
     call_week_total: Optional[float] = None
+    # Per-participant breakdown: {date: [(name, volume), ...]} sorted by volume desc
+    put_daily_breakdown: dict = field(default_factory=dict)
+    call_daily_breakdown: dict = field(default_factory=dict)

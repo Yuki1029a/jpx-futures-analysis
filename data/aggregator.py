@@ -752,10 +752,18 @@ def _aggregate_by_strike(
 
     # Build volume aggregation: (date, type, strike) -> total volume
     vol_agg: dict[tuple[date, str, int], float] = {}
+    # Build per-participant breakdown: (date, type, strike) -> [(name, vol), ...]
+    vol_detail: dict[tuple[date, str, int], list[tuple[str, float]]] = {}
     for td, records in daily_vols.items():
         for r in records:
             key = (td, r.option_type, r.strike_price)
             vol_agg[key] = vol_agg.get(key, 0) + r.volume
+            name = r.participant_name_en or r.participant_name_jp or r.participant_id
+            vol_detail.setdefault(key, []).append((name, r.volume))
+
+    # Sort breakdowns by volume descending
+    for key in vol_detail:
+        vol_detail[key].sort(key=lambda x: -x[1])
 
     rows = []
     for strike in sorted(all_strikes, reverse=True):
@@ -763,6 +771,8 @@ def _aggregate_by_strike(
         put_total = 0.0
         call_daily = {}
         call_total = 0.0
+        put_breakdown = {}
+        call_breakdown = {}
 
         for td in week.trading_days:
             pv = vol_agg.get((td, "PUT", strike), 0)
@@ -770,9 +780,11 @@ def _aggregate_by_strike(
             if pv > 0:
                 put_daily[td] = pv
                 put_total += pv
+                put_breakdown[td] = vol_detail.get((td, "PUT", strike), [])
             if cv > 0:
                 call_daily[td] = cv
                 call_total += cv
+                call_breakdown[td] = vol_detail.get((td, "CALL", strike), [])
 
         ps = start_oi.get(("PUT", strike))  # (long, short) or None
         pe = end_oi.get(("PUT", strike))
@@ -793,6 +805,8 @@ def _aggregate_by_strike(
             call_end_oi_short=ce[1] if ce else None,
             call_daily_volumes=call_daily,
             call_week_total=call_total if call_total > 0 else None,
+            put_daily_breakdown=put_breakdown,
+            call_daily_breakdown=call_breakdown,
         ))
 
     return rows
