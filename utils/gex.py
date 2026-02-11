@@ -16,6 +16,7 @@ import math
 from datetime import date
 from typing import NamedTuple
 
+import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
@@ -110,6 +111,52 @@ def get_sq_date(contract_month: str) -> date:
     second_friday = first_friday + 7
 
     return date(year, mm, second_friday)
+
+
+def calc_gex_surface(
+    strikes: list[int],
+    put_oi: dict[int, int],
+    call_oi: dict[int, int],
+    spot_center: float,
+    spot_range: float,
+    spot_step: float,
+    expiry_date: date,
+    as_of: date,
+    sigma: float = 0.20,
+    r: float = 0.005,
+    contract_multiplier: float = 1000.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute Net GEX surface over spot range x strikes.
+
+    Returns
+    -------
+    spots : 1-D array of spot values (Y axis)
+    strike_arr : 1-D array of strike prices (X axis)
+    surface : 2-D array shape (len(spots), len(strikes)), net_gex per cell
+    """
+    T = max((expiry_date - as_of).days, 0) / 365.0
+    sorted_strikes = sorted(strikes)
+    strike_arr = np.array(sorted_strikes, dtype=float)
+
+    spots = np.arange(
+        spot_center - spot_range,
+        spot_center + spot_range + spot_step,
+        spot_step,
+    )
+
+    c_oi_arr = np.array([call_oi.get(K, 0) for K in sorted_strikes], dtype=float)
+    p_oi_arr = np.array([put_oi.get(K, 0) for K in sorted_strikes], dtype=float)
+
+    surface = np.zeros((len(spots), len(sorted_strikes)))
+
+    for i, S in enumerate(spots):
+        for j, K in enumerate(sorted_strikes):
+            gamma = _bs_gamma(S, K, T, sigma, r) if T > 0 else 0.0
+            call_gex = gamma * c_oi_arr[j] * S * contract_multiplier
+            put_gex = -gamma * p_oi_arr[j] * S * contract_multiplier
+            surface[i, j] = call_gex + put_gex
+
+    return spots, strike_arr, surface
 
 
 # --- Internal ---

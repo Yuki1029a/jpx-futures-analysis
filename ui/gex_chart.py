@@ -10,7 +10,9 @@ import pandas as pd
 from datetime import date
 
 from models import OptionStrikeRow, WeekDefinition
-from utils.gex import calc_gex_profile, get_sq_date
+import plotly.graph_objects as go
+
+from utils.gex import calc_gex_profile, calc_gex_surface, get_sq_date
 
 _DOW_JP = ["月", "火", "水", "木", "金", "土", "日"]
 _OKU = 1e8          # 1億円
@@ -106,6 +108,13 @@ def render_gex_section(
     with st.expander("GEX詳細テーブル"):
         _render_gex_table(profile.df, spot)
 
+    # --- 3D Surface ---
+    st.markdown("---")
+    _render_gex_3d_surface(
+        sorted(all_strikes), put_oi, call_oi,
+        float(spot), sq, as_of, sigma,
+    )
+
 
 def _extract_latest_oi(
     rows: list[OptionStrikeRow],
@@ -186,3 +195,72 @@ def _render_gex_table(df: pd.DataFrame, spot: float) -> None:
         hide_index=True,
         height=min(len(display) * 35 + 40, 600),
     )
+
+
+def _render_gex_3d_surface(
+    strikes: list[int],
+    put_oi: dict[int, int],
+    call_oi: dict[int, int],
+    spot: float,
+    sq: date,
+    as_of: date,
+    sigma: float,
+) -> None:
+    """Render 3D surface: X=strike, Y=spot range, Z=Net GEX."""
+    st.subheader("GEX 3Dサーフェス")
+
+    spot_range = st.slider(
+        "原資産レンジ (±円)", 1000, 5000, 3000, step=500,
+        key="gex_3d_range",
+    )
+
+    spots, strike_arr, surface = calc_gex_surface(
+        strikes=strikes,
+        put_oi=put_oi,
+        call_oi=call_oi,
+        spot_center=spot,
+        spot_range=float(spot_range),
+        spot_step=100.0,
+        expiry_date=sq,
+        as_of=as_of,
+        sigma=sigma,
+    )
+
+    # Scale to per-100-yen move in 億円
+    z_data = surface * _MOVE / _OKU
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Surface(
+        x=strike_arr,
+        y=spots,
+        z=z_data,
+        colorscale="RdYlGn",
+        colorbar=dict(title="Net GEX<br>(億円/100円)"),
+        opacity=0.9,
+    ))
+
+    # Current spot marker line across all strikes
+    spot_idx = int(len(spots) // 2)
+    fig.add_trace(go.Scatter3d(
+        x=strike_arr,
+        y=[spot] * len(strike_arr),
+        z=z_data[spot_idx, :],
+        mode="lines",
+        line=dict(color="blue", width=5),
+        name=f"現在値 {spot:,.0f}",
+    ))
+
+    fig.update_layout(
+        scene=dict(
+            xaxis_title="行使価格",
+            yaxis_title="原資産価格",
+            zaxis_title="Net GEX (億円/100円)",
+        ),
+        height=650,
+        margin=dict(l=0, r=0, t=30, b=0),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("赤=負ガンマ (ディーラーショート), 緑=正ガンマ (ディーラーロング)  |  "
+               "青線=現在の原資産価格")
