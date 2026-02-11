@@ -1,9 +1,9 @@
-"""Option strike-price table with single-row layout, OI bar charts, and breakdown panel.
+"""Option strike-price table with single-row layout, OI progress bars, and breakdown panel.
 
 Each strike = one DataFrame row showing:
-  - Participant-filtered daily volumes (NumberColumn)
-  - Daily OI bar charts [current_oi, previous_oi] (BarChartColumn)
-  - Weekly OI long/short
+  - PUT side: weekly OI, daily volumes, OI progress bars (pink)
+  - 行使価格 (center)
+  - CALL side: OI progress bars (gold), daily volumes, weekly OI
 
 Layout: left = main table (clickable, sortable), right = detail panel.
 """
@@ -35,7 +35,7 @@ def render_option_strike_table(
     # OI bar toggle
     show_oi_bars = st.checkbox("建玉バー表示", value=True, key=f"oi_bar_{tab_label}")
 
-    # Compute max OI for consistent bar scaling
+    # Compute max OI for consistent progress bar scaling
     max_oi = 1
     if show_oi_bars:
         for row in rows:
@@ -155,14 +155,26 @@ def _build_column_config(
 
     col_config["行使価格"] = st.column_config.NumberColumn("行使価格", format="%d")
 
-    # BarChartColumn for OI bars
-    for col in put_oi_cols + call_oi_cols:
+    # ProgressColumn for PUT OI bars (pink)
+    for col in put_oi_cols:
         if col in df.columns:
-            col_config[col] = st.column_config.BarChartColumn(
+            col_config[col] = st.column_config.ProgressColumn(
                 col,
                 width="small",
-                y_min=0,
-                y_max=max_oi,
+                min_value=0,
+                max_value=max_oi,
+                format=" ",
+            )
+
+    # ProgressColumn for CALL OI bars (gold)
+    for col in call_oi_cols:
+        if col in df.columns:
+            col_config[col] = st.column_config.ProgressColumn(
+                col,
+                width="small",
+                min_value=0,
+                max_value=max_oi,
+                format=" ",
             )
 
     return col_config
@@ -175,13 +187,12 @@ def _build_display_dataframe(
 ) -> pd.DataFrame:
     """Build DataFrame with one row per strike.
 
-    Returns DataFrame with _strike_idx metadata column.
+    Column order: PUT side | 行使価格 | CALL side
     """
     records = []
 
     for idx, row in enumerate(rows):
         rec = _build_volume_row(row, week, show_oi_bars)
-        rec["行使価格"] = row.strike_price
         rec["_strike_idx"] = idx
         records.append(rec)
 
@@ -193,40 +204,39 @@ def _build_volume_row(
     week: WeekDefinition,
     show_oi_bars: bool = True,
 ) -> dict:
-    """Build the volume row for a strike, optionally with OI bar data."""
+    """Build the volume row for a strike.
+
+    Column order: P前週L, P前週S, [P日付, P建日], ..., P計, P今週L, P今週S,
+                  行使価格,
+                  C今週L, C今週S, C計, ..., [C日付, C建日], C前週L, C前週S
+    """
     rec = {}
+
+    # --- PUT side (left) ---
     rec["P前週L"] = row.put_start_oi_long
     rec["P前週S"] = row.put_start_oi_short
 
     for td in week.trading_days:
         rec[_day_col(td, "P")] = row.put_daily_volumes.get(td) or None
         if show_oi_bars:
-            curr = row.put_daily_oi.get(td)
-            if curr is not None:
-                chg = row.put_daily_oi_change.get(td, 0)
-                prev = curr - chg if chg else curr
-                rec[_oi_col(td, "P")] = [curr, prev]
-            else:
-                rec[_oi_col(td, "P")] = None
+            rec[_oi_col(td, "P")] = row.put_daily_oi.get(td) or None
 
     rec["P計"] = row.put_week_total
     rec["P今週L"] = row.put_end_oi_long
     rec["P今週S"] = row.put_end_oi_short
 
+    # --- Strike price (center) ---
+    rec["行使価格"] = row.strike_price
+
+    # --- CALL side (right) ---
     rec["C今週L"] = row.call_end_oi_long
     rec["C今週S"] = row.call_end_oi_short
     rec["C計"] = row.call_week_total
 
     for td in reversed(week.trading_days):
-        rec[_day_col(td, "C")] = row.call_daily_volumes.get(td) or None
         if show_oi_bars:
-            curr = row.call_daily_oi.get(td)
-            if curr is not None:
-                chg = row.call_daily_oi_change.get(td, 0)
-                prev = curr - chg if chg else curr
-                rec[_oi_col(td, "C")] = [curr, prev]
-            else:
-                rec[_oi_col(td, "C")] = None
+            rec[_oi_col(td, "C")] = row.call_daily_oi.get(td) or None
+        rec[_day_col(td, "C")] = row.call_daily_volumes.get(td) or None
 
     rec["C前週L"] = row.call_start_oi_long
     rec["C前週S"] = row.call_start_oi_short
