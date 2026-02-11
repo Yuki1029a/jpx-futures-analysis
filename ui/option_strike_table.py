@@ -71,8 +71,13 @@ def render_option_strike_table(
     # Handle cell selection -> show breakdown dialog
     if event and event.selection and event.selection.cells:
         cell = event.selection.cells[0]
-        row_idx = cell["row"]
-        col_name = cell["column"]
+        # Streamlit versions return either dict {"row":…,"column":…} or tuple (row, col)
+        if isinstance(cell, dict):
+            row_idx = cell["row"]
+            col_name = cell["column"]
+        else:
+            row_idx = cell[0]
+            col_name = df.columns[cell[1]] if isinstance(cell[1], int) else cell[1]
 
         # Only respond to daily volume columns (P02/05(月) or C02/05(月))
         if col_name in put_day_cols or col_name in call_day_cols:
