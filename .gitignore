@@ -4,4 +4,5 @@ cache/
 .claude/
 *.egg-info/
 .env
+.streamlit/secrets.toml
 plan.md

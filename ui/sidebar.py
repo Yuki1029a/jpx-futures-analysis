@@ -72,23 +72,40 @@ def render_sidebar() -> dict:
     else:
         st.sidebar.info("オプション限月データなし")
 
-    # Option participant filter
+    # Option participant filter (individual checkboxes)
     option_participant_ids = None  # None = all participants
     if option_contract_month:
         participants = get_option_participants(week, option_contract_month)
         if participants:
             with st.sidebar.expander("参加者フィルター", expanded=False):
-                select_all = st.checkbox("全員選択", value=True, key="opt_select_all")
-                if select_all:
-                    option_participant_ids = None  # all
+                # Select all / Deselect all buttons
+                btn_col1, btn_col2 = st.columns(2)
+                with btn_col1:
+                    if st.button("全選択", key="opt_sel_all"):
+                        for pid, _ in participants:
+                            st.session_state[f"opt_pid_{pid}"] = True
+                with btn_col2:
+                    if st.button("全解除", key="opt_desel_all"):
+                        for pid, _ in participants:
+                            st.session_state[f"opt_pid_{pid}"] = False
+
+                # Individual checkboxes
+                selected_pids = []
+                for pid, name in participants:
+                    key = f"opt_pid_{pid}"
+                    if key not in st.session_state:
+                        st.session_state[key] = True
+                    checked = st.checkbox(name, key=key)
+                    if checked:
+                        selected_pids.append(pid)
+
+                # Return None (all) if everyone is checked, else the list
+                if len(selected_pids) == len(participants):
+                    option_participant_ids = None
+                elif selected_pids:
+                    option_participant_ids = selected_pids
                 else:
-                    selected = st.multiselect(
-                        "参加者を選択",
-                        options=[pid for pid, _ in participants],
-                        default=[pid for pid, _ in participants],
-                        format_func=lambda pid: dict(participants).get(pid, pid),
-                    )
-                    option_participant_ids = selected if selected else None
+                    option_participant_ids = []  # empty = no data
 
     return {
         "product": product,
