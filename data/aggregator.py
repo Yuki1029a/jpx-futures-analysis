@@ -418,19 +418,19 @@ def compute_20d_stats(
 ) -> dict[str, tuple[float, float]]:
     """Compute 20-business-day average and max daily volume per participant.
 
-    Looks back 20 trading dates from the start of the given week.
+    Uses the most recent 20 trading dates up to and including the last
+    trading day of the given week (i.e. the current week's data IS included).
     Returns: {participant_id: (avg, max)}
     """
     _ensure_trading_date_index()
 
-    # Find the 20 trading dates ending at the day before the week starts
-    # Use all trading dates up to and including the last trading day before week.trading_days[0]
     if not week.trading_days:
         return {}
 
-    week_start = week.trading_days[0]
-    lookback_dates = [d for d in _trading_dates_cache if d < week_start]
-    lookback_dates = lookback_dates[-20:]  # last 20
+    week_end = week.trading_days[-1]
+    # All trading dates up to and including the last day of this week
+    candidates = [d for d in _trading_dates_cache if d <= week_end]
+    lookback_dates = candidates[-20:]  # last 20
 
     if not lookback_dates:
         return {}
@@ -446,10 +446,11 @@ def compute_20d_stats(
         for r in records:
             pid_daily.setdefault(r.participant_id, []).append(r.volume)
 
-    # Compute stats
+    # Compute stats (avg over full 20-day window, not just days with activity)
+    n_days = len(lookback_dates)
     result = {}
     for pid, volumes in pid_daily.items():
-        avg = sum(volumes) / len(volumes)
+        avg = sum(volumes) / n_days
         mx = max(volumes)
         result[pid] = (avg, mx)
 
