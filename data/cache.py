@@ -88,21 +88,15 @@ def save_to_cache(url: str, subdir: Path, content: bytes) -> Path:
 def get_cached_json(url: str, max_age_hours: float = 1.0) -> Optional[dict]:
     """Return cached JSON index if fresh enough, else None.
 
-    Checks L1 (local) then L2 (R2).
+    Only checks L1 (local filesystem). JSON indexes change frequently
+    (new trading days appear daily) so R2 must not override freshness —
+    R2 has no age metadata, causing stale data to be served as fresh.
     """
     path = _cache_path_for_url(url, config.CACHE_INDEX_DIR)
 
-    # L1: local filesystem
+    # L1: local filesystem only
     if _is_fresh(path, max_age_hours):
         return json.loads(path.read_text(encoding="utf-8"))
-
-    # L2: R2
-    key = _r2_key(config.CACHE_INDEX_DIR, path.name)
-    content = r2_get(key)
-    if content is not None:
-        # Populate L1 from L2
-        path.write_bytes(content)
-        return json.loads(content.decode("utf-8"))
 
     return None
 

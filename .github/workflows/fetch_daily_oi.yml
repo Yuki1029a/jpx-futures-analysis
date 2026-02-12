@@ -1,8 +1,10 @@
-name: Fetch Daily OI Balance
+name: Fetch Daily JPX Data
 
 on:
   schedule:
-    # 11:15 UTC = 20:15 JST, weekdays only
+    # 09:00 UTC = 18:00 JST — participant volume (手口)
+    - cron: '0 9 * * 1-5'
+    # 11:15 UTC = 20:15 JST — daily OI balance (建玉残高)
     - cron: '15 11 * * 1-5'
   workflow_dispatch:
 
@@ -20,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: pip install requests openpyxl boto3
 
-      - name: Fetch and cache daily OI
+      - name: Fetch and cache JPX data
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}

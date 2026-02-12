@@ -7,7 +7,7 @@ Night session date handling:
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 from models import (
     ParticipantVolume, ParticipantOI,
@@ -120,6 +120,19 @@ def build_available_weeks(max_weeks: int = 26) -> list[WeekDefinition]:
         latest_oi = oi_dates[-1]
         future_trades = [d for d in trading_dates if d > latest_oi]
         if future_trades:
+            future_trades.sort()
+            # Extend to today: add weekdays between last known trade and today
+            # Only add dates where daily OI data actually exists (skip holidays)
+            today = date.today()
+            last_known = future_trades[-1]
+            d = last_known + timedelta(days=1)
+            while d <= today:
+                if d.weekday() < 5 and d not in future_trades:  # Mon-Fri
+                    # Probe: check if daily OI file exists for this date
+                    content = fetcher.download_daily_oi_excel(d)
+                    if content is not None:
+                        future_trades.append(d)
+                d += timedelta(days=1)
             future_trades.sort()
             weeks.append(WeekDefinition(
                 start_oi_date=latest_oi,
