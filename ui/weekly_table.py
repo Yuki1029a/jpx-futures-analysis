@@ -41,9 +41,9 @@ def render_weekly_table(
         st.warning("選択された条件のデータがありません。")
         return
 
-    # Daily futures OI summary above the table
+    # Daily futures OI bar above the table
     if daily_futures_oi:
-        _render_daily_oi_summary(week, daily_futures_oi)
+        _render_daily_oi_bar(week, daily_futures_oi)
 
     df = _build_display_dataframe(rows, week, show_oi, stats_20d)
     styled = _apply_table_styling(df, week, show_oi)
@@ -195,32 +195,77 @@ def _render_summary_stats(rows: list[WeeklyParticipantRow]) -> None:
         st.metric("全体Net増減", f"{int(total_net):+,}", delta_color=delta_color)
 
 
-def _render_daily_oi_summary(
+def _render_daily_oi_bar(
     week: WeekDefinition,
     daily_futures_oi: dict,
 ) -> None:
-    """Render daily OI balance summary row aligned with trading days."""
+    """Render daily OI as a progress bar row + change metrics aligned with trading days."""
     days = week.trading_days
     if not days:
         return
 
-    cols = st.columns(len(days))
-    for col, td in zip(cols, days):
+    # Collect all OI values to determine max for progress bar scaling
+    oi_values: list[int] = []
+    for td in days:
+        rec = daily_futures_oi.get(td)
+        if rec:
+            oi_values.append(rec.current_oi)
+            if rec.previous_oi > 0:
+                oi_values.append(rec.previous_oi)
+
+    if not oi_values:
+        return
+
+    max_oi = max(oi_values) if oi_values else 1
+
+    # OI bar row (ProgressColumn)
+    rec_oi: dict[str, int | None] = {}
+    for td in days:
         dow = _DOW_JP[td.weekday()]
+        col = f"{td.strftime('%m/%d')}({dow})"
         oi_rec = daily_futures_oi.get(td)
-        with col:
+        rec_oi[col] = oi_rec.current_oi if oi_rec else None
+
+    df_oi = pd.DataFrame([rec_oi])
+    day_cols = list(rec_oi.keys())
+
+    col_config = {}
+    for col in day_cols:
+        col_config[col] = st.column_config.ProgressColumn(
+            col,
+            min_value=0,
+            max_value=int(max_oi * 1.05),
+            format=" ",
+        )
+
+    st.caption("建玉残高")
+    st.dataframe(
+        df_oi,
+        column_config=col_config,
+        use_container_width=True,
+        hide_index=True,
+        height=50,
+    )
+
+    # Change row as colored metrics
+    cols = st.columns(len(days))
+    for col_ui, td in zip(cols, days):
+        oi_rec = daily_futures_oi.get(td)
+        with col_ui:
             if oi_rec:
                 chg = oi_rec.net_change
-                delta_str = f"{chg:+,}"
-                st.metric(
-                    label=f"{td.strftime('%m/%d')}({dow})",
-                    value=f"{oi_rec.current_oi:,}",
-                    delta=delta_str,
+                color = "#006100" if chg >= 0 else "#9c0006"
+                st.markdown(
+                    f"<div style='text-align:center;font-size:0.85em;'>"
+                    f"<b>{oi_rec.current_oi:,}</b><br>"
+                    f"<span style='color:{color}'>{chg:+,}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
                 )
             else:
-                st.metric(
-                    label=f"{td.strftime('%m/%d')}({dow})",
-                    value="-",
+                st.markdown(
+                    "<div style='text-align:center;font-size:0.85em;'>-</div>",
+                    unsafe_allow_html=True,
                 )
 
 
