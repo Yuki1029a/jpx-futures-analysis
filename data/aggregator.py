@@ -651,6 +651,8 @@ def load_daily_futures_oi(
     """Load daily futures OI balance for each trading day in the week.
 
     Returns {date: DailyFuturesOI} for the matching product and contract month.
+    Also derives previous day's OI from next day's previous_oi field
+    (e.g. Tuesday's previous_oi = Monday's current_oi).
     """
     result: dict[date, DailyFuturesOI] = {}
     for td in week.trading_days:
@@ -671,6 +673,33 @@ def load_daily_futures_oi(
             if r.product == product and r.contract_month == contract_month:
                 result[td] = r
                 break
+
+    # Derive previous day's OI from next day's previous_oi field
+    trading_day_set = set(week.trading_days)
+    for td in list(result.keys()):
+        rec = result[td]
+        if rec.previous_oi > 0:
+            prev_td = _get_prev_trading_date(td)
+            if prev_td is not None and prev_td in trading_day_set and prev_td not in result:
+                # Reconstruct previous day's record from current day's previous_oi
+                # We know: prev day current_oi = this day previous_oi
+                # prev day net_change is unknown, approximate from OI difference
+                # Look for the day before prev_td to get prev_prev_oi
+                prev_prev_td = _get_prev_trading_date(prev_td)
+                prev_prev_oi = 0
+                if prev_prev_td and prev_prev_td in result:
+                    prev_prev_oi = result[prev_prev_td].current_oi
+
+                derived_change = rec.previous_oi - prev_prev_oi if prev_prev_oi > 0 else 0
+                result[prev_td] = DailyFuturesOI(
+                    report_date=prev_td,
+                    product=product,
+                    contract_month=contract_month,
+                    trading_volume=0,
+                    current_oi=rec.previous_oi,
+                    net_change=derived_change,
+                    previous_oi=prev_prev_oi,
+                )
 
     return result
 
