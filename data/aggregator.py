@@ -933,6 +933,8 @@ def _aggregate_by_strike(
         put_doi_chg = {}
         call_doi = {}
         call_doi_chg = {}
+        put_jpx_vol = {}
+        call_jpx_vol = {}
 
         for td in week.trading_days:
             pv = vol_agg.get((td, "PUT", strike), 0)
@@ -946,15 +948,19 @@ def _aggregate_by_strike(
                 call_total += cv
                 call_breakdown[td] = vol_detail.get((td, "CALL", strike), [])
 
-            # Daily OI balance
+            # Daily OI balance + JPX aggregate volume
             p_bal = oi_bal_lookup.get((td, "PUT", strike))
             if p_bal:
                 put_doi[td] = p_bal.current_oi
                 put_doi_chg[td] = p_bal.net_change
+                if p_bal.trading_volume > 0:
+                    put_jpx_vol[td] = p_bal.trading_volume
             c_bal = oi_bal_lookup.get((td, "CALL", strike))
             if c_bal:
                 call_doi[td] = c_bal.current_oi
                 call_doi_chg[td] = c_bal.net_change
+                if c_bal.trading_volume > 0:
+                    call_jpx_vol[td] = c_bal.trading_volume
 
         ps = start_oi.get(("PUT", strike))  # (long, short) or None
         pe = end_oi.get(("PUT", strike))
@@ -981,6 +987,8 @@ def _aggregate_by_strike(
             put_daily_oi_change=put_doi_chg,
             call_daily_oi=call_doi,
             call_daily_oi_change=call_doi_chg,
+            put_daily_jpx_volume=put_jpx_vol,
+            call_daily_jpx_volume=call_jpx_vol,
         ))
 
     return rows

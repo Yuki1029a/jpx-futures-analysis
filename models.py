@@ -140,3 +140,6 @@ class OptionStrikeRow:
     put_daily_oi_change: dict = field(default_factory=dict) # {date: net_change}
     call_daily_oi: dict = field(default_factory=dict)       # {date: current_oi}
     call_daily_oi_change: dict = field(default_factory=dict) # {date: net_change}
+    # JPX aggregate trading volume per strike (from open_interest.xlsx)
+    put_daily_jpx_volume: dict = field(default_factory=dict)  # {date: trading_volume}
+    call_daily_jpx_volume: dict = field(default_factory=dict)
