@@ -24,6 +24,9 @@ st.set_page_config(
 
 ensure_cache_dirs()
 
+# Debug: deployment version
+_APP_VERSION = "2026-02-13a"
+
 
 def _make_cache_key(product, contract_month, wk_label, sk_str, kind):
     """Build a unique string key for session_state caching."""
@@ -63,6 +66,7 @@ def _get_or_load_options(week, contract_month, sk_str, session_keys, participant
 
 
 def main():
+    st.sidebar.caption(f"v{_APP_VERSION}")
     selections = render_sidebar()
 
     product = selections["product"]
