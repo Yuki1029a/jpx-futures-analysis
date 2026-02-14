@@ -184,10 +184,14 @@ def _apply_styling(
 
     signed_cols = put_chg_cols | call_chg_cols
 
-    def _cell_style(row_idx, col):
-        if row_idx == 0:
+    # Index labels for summary rows
+    summary_put_label = df.index[0]   # "PUT合計"
+    summary_call_label = df.index[1]  # "CALL合計"
+
+    def _cell_style(row_label, col):
+        if row_label == summary_put_label:
             return f"background-color: {_SUMMARY_PUT_BG}; font-weight: bold"
-        if row_idx == 1:
+        if row_label == summary_call_label:
             return f"background-color: {_SUMMARY_CALL_BG}; font-weight: bold"
         if col in put_day_cols or col in put_week_oi:
             return f"background-color: {_PUT_BG}"
@@ -223,9 +227,10 @@ def _apply_styling(
 
     valid_chg = [c for c in signed_cols if c in df.columns]
     if valid_chg:
-        participant_idx = list(range(_SUMMARY_ROWS, len(df)))
-        if participant_idx:
-            styled = styled.map(_color_signed, subset=(participant_idx, valid_chg))
+        # Use index labels (not integer positions) since 行使価格 is the index
+        participant_labels = list(df.index[_SUMMARY_ROWS:])
+        if participant_labels:
+            styled = styled.map(_color_signed, subset=(participant_labels, valid_chg))
 
     fmt_int = lambda v: f"{int(v):,}" if pd.notna(v) and v != "" else "-"
     fmt_signed = lambda v: f"{int(v):+,}" if pd.notna(v) and v != "" else "-"
