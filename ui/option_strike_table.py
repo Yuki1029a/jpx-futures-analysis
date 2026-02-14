@@ -1,11 +1,10 @@
 """Option strike-price table with Styler-based rendering + clickable navigator.
 
 Architecture:
-  1. Main table (Styler) — full data with color coding, number formatting
+  1. Main table (Styler → HTML) — full data with color coding, number formatting,
+     sticky 行使価格 column that stays visible during horizontal scroll.
   2. Navigator grid (st.dataframe on_select) — compact strike x date grid
-     Click a cell → detail panel updates with participant breakdown + OI
-
-This achieves both readability (Styler) and interactivity (cell click).
+     showing daily volumes + OI per strike. Click a cell → detail panel.
 """
 from __future__ import annotations
 
@@ -16,7 +15,6 @@ from models import OptionStrikeRow, WeekDefinition
 
 _DOW_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
-# Summary header row count
 _SUMMARY_ROWS = 2
 
 # --- Color palette ---
@@ -46,16 +44,15 @@ def render_option_strike_table(
         st.warning("オプションデータがありません。")
         return
 
-    # ====== 1. Main Styler table (full data, read-only) ======
+    # ====== 1. Main Styler table (HTML with sticky strike column) ======
     ordered_cols = _build_column_order(week)
     df = _build_display_dataframe(rows, week, ordered_cols)
     styled = _apply_styling(df, week)
 
-    st.dataframe(
-        styled,
-        use_container_width=True,
-        height=min(len(df) * 35 + 60, 900),
-    )
+    # Find strike column index (0-based among data columns)
+    strike_col_idx = ordered_cols.index("行使価格")
+
+    _render_sticky_table(styled, strike_col_idx, tab_label)
 
     # ====== 2. Navigator grid + Detail panel (side by side) ======
     st.markdown("---")
@@ -63,7 +60,6 @@ def render_option_strike_table(
 
     nav_left, nav_right = st.columns([2, 1])
 
-    # Build navigator DataFrame
     nav_df, nav_meta = _build_navigator_df(rows, week)
 
     with nav_left:
@@ -78,7 +74,6 @@ def render_option_strike_table(
             column_config=_nav_column_config(nav_df),
         )
 
-    # Parse navigator cell selection
     selected_strike_idx = None
     selected_date = None
     selected_type = None
@@ -102,6 +97,83 @@ def render_option_strike_table(
         )
 
     _render_option_summary(rows)
+
+
+# =====================================================================
+# Sticky HTML table rendering
+# =====================================================================
+
+def _render_sticky_table(
+    styled: pd.io.formats.style.Styler,
+    strike_col_idx: int,
+    tab_label: str,
+) -> None:
+    """Render Styler as HTML with sticky strike price column.
+
+    The strike price column (and header) stays fixed while scrolling horizontally.
+    Uses CSS position:sticky with appropriate left offset.
+    """
+    # th/td are 1-indexed in nth-child (col 0 = row header if present)
+    # Styler hides index by default when we set hide(axis="index")
+    styled = styled.hide(axis="index")
+    html = styled.to_html()
+
+    # CSS nth-child is 1-based, and since index is hidden,
+    # column 0 in data = nth-child(1) in rendered table
+    nth = strike_col_idx + 1
+
+    table_id = f"sticky_table_{tab_label}".replace(" ", "_")
+
+    css = f"""
+    <style>
+    #{table_id} {{
+        overflow-x: auto;
+        max-height: 800px;
+        overflow-y: auto;
+        border: 1px solid #ddd;
+        position: relative;
+    }}
+    #{table_id} table {{
+        border-collapse: separate;
+        border-spacing: 0;
+        font-size: 12px;
+        white-space: nowrap;
+    }}
+    #{table_id} th, #{table_id} td {{
+        padding: 4px 8px;
+        border: 1px solid #e0e0e0;
+        text-align: right;
+    }}
+    /* Sticky strike price column */
+    #{table_id} td:nth-child({nth}),
+    #{table_id} th:nth-child({nth}) {{
+        position: sticky;
+        left: 0;
+        z-index: 2;
+        background-color: {_STRIKE_BG} !important;
+        font-weight: bold;
+        text-align: center;
+        border-right: 2px solid #bbb;
+        min-width: 80px;
+    }}
+    /* Sticky header row */
+    #{table_id} thead th {{
+        position: sticky;
+        top: 0;
+        z-index: 3;
+        background-color: #f8f9fa;
+        border-bottom: 2px solid #999;
+    }}
+    /* Corner cell: both sticky directions */
+    #{table_id} thead th:nth-child({nth}) {{
+        z-index: 4;
+        background-color: {_STRIKE_BG} !important;
+    }}
+    </style>
+    """
+
+    full_html = f'{css}<div id="{table_id}">{html}</div>'
+    st.markdown(full_html, unsafe_allow_html=True)
 
 
 # =====================================================================
@@ -341,7 +413,7 @@ def _build_volume_row(row, week):
 
 
 # =====================================================================
-# Navigator grid (compact, clickable)
+# Navigator grid (compact, clickable) — daily volume + OI
 # =====================================================================
 
 def _nav_day_label(td: date) -> str:
@@ -352,21 +424,23 @@ def _build_navigator_df(
     rows: list[OptionStrikeRow],
     week: WeekDefinition,
 ) -> tuple[pd.DataFrame, list[int]]:
-    """Build a compact strike x date grid showing P/C volumes.
+    """Build compact navigator: strike x (P出来高, P建玉, C出来高, C建玉) per day.
 
-    Columns: 行使価格 | P{date1} | C{date1} | P{date2} | C{date2} | ...
-    Returns (DataFrame, row_index_map) where row_index_map[i] = index into rows list.
+    Columns per day: P高{dd} P残{dd} | C残{dd} C高{dd}
+    Returns (DataFrame, row_index_map).
     """
     col_order = ["行使価格"]
     for td in week.trading_days:
-        col_order.append(f"P {_nav_day_label(td)}")
-        col_order.append(f"C {_nav_day_label(td)}")
+        dd = td.strftime("%d")
+        col_order.append(f"P高{dd}")
+        col_order.append(f"P残{dd}")
+        col_order.append(f"C残{dd}")
+        col_order.append(f"C高{dd}")
 
     records = []
-    meta = []  # maps nav row index -> rows list index
+    meta = []
 
     for idx, row in enumerate(rows):
-        # Skip strikes with zero activity
         has_activity = (
             any(row.put_daily_volumes.get(td, 0) > 0 for td in week.trading_days)
             or any(row.call_daily_volumes.get(td, 0) > 0 for td in week.trading_days)
@@ -378,10 +452,15 @@ def _build_navigator_df(
 
         rec = {"行使価格": f"{row.strike_price:,}"}
         for td in week.trading_days:
+            dd = td.strftime("%d")
             p_vol = row.put_daily_volumes.get(td, 0)
+            p_oi = row.put_daily_oi.get(td, 0)
             c_vol = row.call_daily_volumes.get(td, 0)
-            rec[f"P {_nav_day_label(td)}"] = p_vol if p_vol else None
-            rec[f"C {_nav_day_label(td)}"] = c_vol if c_vol else None
+            c_oi = row.call_daily_oi.get(td, 0)
+            rec[f"P高{dd}"] = p_vol if p_vol else None
+            rec[f"P残{dd}"] = p_oi if p_oi else None
+            rec[f"C残{dd}"] = c_oi if c_oi else None
+            rec[f"C高{dd}"] = c_vol if c_vol else None
         records.append(rec)
         meta.append(idx)
 
@@ -390,7 +469,6 @@ def _build_navigator_df(
 
 
 def _nav_column_config(df: pd.DataFrame) -> dict:
-    """Column config for navigator grid."""
     cfg = {}
     cfg["行使価格"] = st.column_config.TextColumn("行使価格", width="small")
     for col in df.columns:
@@ -406,10 +484,10 @@ def _parse_nav_col(
 ) -> tuple[date | None, str | None]:
     """Parse navigator column name to (date, 'PUT'/'CALL')."""
     for td in week.trading_days:
-        label = _nav_day_label(td)
-        if col_name == f"P {label}":
+        dd = td.strftime("%d")
+        if col_name in (f"P高{dd}", f"P残{dd}"):
             return td, "PUT"
-        if col_name == f"C {label}":
+        if col_name in (f"C高{dd}", f"C残{dd}"):
             return td, "CALL"
     return None, None
 
@@ -426,7 +504,6 @@ def _render_detail_panel(
     selected_type: str | None,
     tab_label: str,
 ) -> None:
-    """Right panel: show participant breakdown + daily OI for selected cell."""
     st.markdown("**詳細パネル**")
 
     if strike_idx is None or strike_idx >= len(rows):
@@ -439,7 +516,6 @@ def _render_detail_panel(
         selected_type = "CALL"
 
     if selected_date is None:
-        # Fallback: let user pick date
         day_labels = [f"{td.strftime('%m/%d')}({_DOW_JP[td.weekday()]})"
                       for td in week.trading_days]
         prefix = f"bd_{tab_label}"
