@@ -188,49 +188,49 @@ def _apply_styling(
     summary_put_label = df.index[0]   # "PUT合計"
     summary_call_label = df.index[1]  # "CALL合計"
 
-    def _cell_style(row_label, col):
+    def _cell_style(row_label, col, val):
+        """Combined background + text color for a single cell."""
+        parts = []
+
+        # Background color
         if row_label == summary_put_label:
-            return f"background-color: {_SUMMARY_PUT_BG}; font-weight: bold"
-        if row_label == summary_call_label:
-            return f"background-color: {_SUMMARY_CALL_BG}; font-weight: bold"
-        if col in put_day_cols or col in put_week_oi:
-            return f"background-color: {_PUT_BG}"
-        if col in put_jpx_cols:
-            return f"background-color: {_JPX_BG_P}"
-        if col in put_oi_cols or col in put_chg_cols:
-            return f"background-color: {_OI_BG_P}"
-        if col in call_day_cols or col in call_week_oi:
-            return f"background-color: {_CALL_BG}"
-        if col in call_jpx_cols:
-            return f"background-color: {_JPX_BG_C}"
-        if col in call_oi_cols or col in call_chg_cols:
-            return f"background-color: {_OI_BG_C}"
-        return ""
+            parts.append(f"background-color: {_SUMMARY_PUT_BG}; font-weight: bold")
+        elif row_label == summary_call_label:
+            parts.append(f"background-color: {_SUMMARY_CALL_BG}; font-weight: bold")
+        elif col in put_day_cols or col in put_week_oi:
+            parts.append(f"background-color: {_PUT_BG}")
+        elif col in put_jpx_cols:
+            parts.append(f"background-color: {_JPX_BG_P}")
+        elif col in put_oi_cols or col in put_chg_cols:
+            parts.append(f"background-color: {_OI_BG_P}")
+        elif col in call_day_cols or col in call_week_oi:
+            parts.append(f"background-color: {_CALL_BG}")
+        elif col in call_jpx_cols:
+            parts.append(f"background-color: {_JPX_BG_C}")
+        elif col in call_oi_cols or col in call_chg_cols:
+            parts.append(f"background-color: {_OI_BG_C}")
 
-    def _apply_cell_colors(s):
-        return [_cell_style(s.name, col) for col in s.index]
+        # Signed text color for OI change columns (non-summary rows)
+        if (col in signed_cols
+                and row_label != summary_put_label
+                and row_label != summary_call_label):
+            try:
+                if pd.notna(val):
+                    n = float(val)
+                    if n > 0:
+                        parts.append("color: #006100")
+                    elif n < 0:
+                        parts.append("color: #9c0006")
+            except (ValueError, TypeError):
+                pass
 
-    def _color_signed(val):
-        if pd.isna(val):
-            return ""
-        try:
-            n = float(val)
-            if n > 0:
-                return "color: #006100"
-            elif n < 0:
-                return "color: #9c0006"
-        except (ValueError, TypeError):
-            pass
-        return ""
+        return "; ".join(parts)
 
-    styled = df.style.apply(_apply_cell_colors, axis=1)
+    def _apply_all_styles(s):
+        """Apply background + text color for each cell in a row."""
+        return [_cell_style(s.name, col, s[col]) for col in s.index]
 
-    valid_chg = [c for c in signed_cols if c in df.columns]
-    if valid_chg:
-        # Use index labels (not integer positions) since 行使価格 is the index
-        participant_labels = list(df.index[_SUMMARY_ROWS:])
-        if participant_labels:
-            styled = styled.map(_color_signed, subset=(participant_labels, valid_chg))
+    styled = df.style.apply(_apply_all_styles, axis=1)
 
     fmt_int = lambda v: f"{int(v):,}" if pd.notna(v) and v != "" else "-"
     fmt_signed = lambda v: f"{int(v):+,}" if pd.notna(v) and v != "" else "-"
