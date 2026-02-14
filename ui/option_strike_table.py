@@ -1,8 +1,8 @@
-"""Option strike-price table with Styler-based rendering + clickable navigator.
+"""Option strike-price table with Styler rendering + clickable navigator.
 
 Architecture:
-  1. Main table (Styler → HTML) — full data with color coding, number formatting,
-     sticky 行使価格 column that stays visible during horizontal scroll.
+  1. Main table (Styler via st.dataframe) — color-coded, formatted, with
+     行使価格 as DataFrame index (pinned left in Streamlit's grid).
   2. Navigator grid (st.dataframe on_select) — compact strike x date grid
      showing daily volumes + OI per strike. Click a cell → detail panel.
 """
@@ -44,15 +44,19 @@ def render_option_strike_table(
         st.warning("オプションデータがありません。")
         return
 
-    # ====== 1. Main Styler table (HTML with sticky strike column) ======
+    # ====== 1. Main table with 行使価格 as index (pinned left) ======
     ordered_cols = _build_column_order(week)
     df = _build_display_dataframe(rows, week, ordered_cols)
+
+    # Set 行使価格 as index → Streamlit pins index columns on left
+    df = df.set_index("行使価格")
+
     styled = _apply_styling(df, week)
-
-    # Find strike column index (0-based among data columns)
-    strike_col_idx = ordered_cols.index("行使価格")
-
-    _render_sticky_table(styled, strike_col_idx, tab_label)
+    st.dataframe(
+        styled,
+        use_container_width=True,
+        height=min(len(df) * 35 + 60, 900),
+    )
 
     # ====== 2. Navigator grid + Detail panel (side by side) ======
     st.markdown("---")
@@ -100,83 +104,6 @@ def render_option_strike_table(
 
 
 # =====================================================================
-# Sticky HTML table rendering
-# =====================================================================
-
-def _render_sticky_table(
-    styled: pd.io.formats.style.Styler,
-    strike_col_idx: int,
-    tab_label: str,
-) -> None:
-    """Render Styler as HTML with sticky strike price column.
-
-    The strike price column (and header) stays fixed while scrolling horizontally.
-    Uses CSS position:sticky with appropriate left offset.
-    """
-    # th/td are 1-indexed in nth-child (col 0 = row header if present)
-    # Styler hides index by default when we set hide(axis="index")
-    styled = styled.hide(axis="index")
-    html = styled.to_html()
-
-    # CSS nth-child is 1-based, and since index is hidden,
-    # column 0 in data = nth-child(1) in rendered table
-    nth = strike_col_idx + 1
-
-    table_id = f"sticky_table_{tab_label}".replace(" ", "_")
-
-    css = f"""
-    <style>
-    #{table_id} {{
-        overflow-x: auto;
-        max-height: 800px;
-        overflow-y: auto;
-        border: 1px solid #ddd;
-        position: relative;
-    }}
-    #{table_id} table {{
-        border-collapse: separate;
-        border-spacing: 0;
-        font-size: 12px;
-        white-space: nowrap;
-    }}
-    #{table_id} th, #{table_id} td {{
-        padding: 4px 8px;
-        border: 1px solid #e0e0e0;
-        text-align: right;
-    }}
-    /* Sticky strike price column */
-    #{table_id} td:nth-child({nth}),
-    #{table_id} th:nth-child({nth}) {{
-        position: sticky;
-        left: 0;
-        z-index: 2;
-        background-color: {_STRIKE_BG} !important;
-        font-weight: bold;
-        text-align: center;
-        border-right: 2px solid #bbb;
-        min-width: 80px;
-    }}
-    /* Sticky header row */
-    #{table_id} thead th {{
-        position: sticky;
-        top: 0;
-        z-index: 3;
-        background-color: #f8f9fa;
-        border-bottom: 2px solid #999;
-    }}
-    /* Corner cell: both sticky directions */
-    #{table_id} thead th:nth-child({nth}) {{
-        z-index: 4;
-        background-color: {_STRIKE_BG} !important;
-    }}
-    </style>
-    """
-
-    full_html = f'{css}<div id="{table_id}">{html}</div>'
-    st.markdown(full_html, unsafe_allow_html=True)
-
-
-# =====================================================================
 # Column name helpers
 # =====================================================================
 
@@ -198,7 +125,7 @@ def _oi_chg_col(td: date, prefix: str) -> str:
 
 
 # =====================================================================
-# Main table column order
+# Main table column order (excluding 行使価格 which becomes index)
 # =====================================================================
 
 def _build_column_order(week: WeekDefinition) -> list[str]:
@@ -240,8 +167,10 @@ def _apply_styling(
     df: pd.DataFrame,
     week: WeekDefinition,
 ) -> pd.io.formats.style.Styler:
-    """Color coding + number formatting."""
+    """Color coding + number formatting.
 
+    Note: st.dataframe renders Styler with background colors intact.
+    """
     put_day_cols = set(_day_col(td, "P") for td in week.trading_days)
     call_day_cols = set(_day_col(td, "C") for td in week.trading_days)
     put_jpx_cols = set(_jpx_vol_col(td, "P") for td in week.trading_days)
@@ -260,8 +189,6 @@ def _apply_styling(
             return f"background-color: {_SUMMARY_PUT_BG}; font-weight: bold"
         if row_idx == 1:
             return f"background-color: {_SUMMARY_CALL_BG}; font-weight: bold"
-        if col == "行使価格":
-            return f"background-color: {_STRIKE_BG}; font-weight: bold; text-align: center"
         if col in put_day_cols or col in put_week_oi:
             return f"background-color: {_PUT_BG}"
         if col in put_jpx_cols:
@@ -304,8 +231,6 @@ def _apply_styling(
     fmt_signed = lambda v: f"{int(v):+,}" if pd.notna(v) and v != "" else "-"
 
     for col in df.columns:
-        if col == "行使価格":
-            continue
         if col in signed_cols:
             styled = styled.format(fmt_signed, subset=[col])
         else:
@@ -424,7 +349,7 @@ def _build_navigator_df(
     rows: list[OptionStrikeRow],
     week: WeekDefinition,
 ) -> tuple[pd.DataFrame, list[int]]:
-    """Build compact navigator: strike x (P出来高, P建玉, C出来高, C建玉) per day.
+    """Build compact navigator: strike x (P volume, P OI, C OI, C volume) per day.
 
     Columns per day: P高{dd} P残{dd} | C残{dd} C高{dd}
     Returns (DataFrame, row_index_map).
