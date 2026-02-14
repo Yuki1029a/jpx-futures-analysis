@@ -1,12 +1,11 @@
-"""Option strike-price table with Styler-based rendering for readability.
+"""Option strike-price table with Styler-based rendering + clickable navigator.
 
-Each strike = one DataFrame row showing:
-  - PUT side: weekly OI, daily volumes, JPX volume, daily OI
-  - 行使価格 (center, highlighted)
-  - CALL side: daily OI, JPX volume, daily volumes, weekly OI
+Architecture:
+  1. Main table (Styler) — full data with color coding, number formatting
+  2. Navigator grid (st.dataframe on_select) — compact strike x date grid
+     Click a cell → detail panel updates with participant breakdown + OI
 
-Uses pandas Styler for conditional formatting, color-coded columns,
-and number formatting consistent with the futures weekly_table.py.
+This achieves both readability (Styler) and interactivity (cell click).
 """
 from __future__ import annotations
 
@@ -21,16 +20,15 @@ _DOW_JP = ["月", "火", "水", "木", "金", "土", "日"]
 _SUMMARY_ROWS = 2
 
 # --- Color palette ---
-_PUT_BG = "#fff0f0"         # Very light red for PUT columns
-_CALL_BG = "#f0f4ff"        # Very light blue for CALL columns
-_STRIKE_BG = "#fffde7"      # Light yellow for strike price column
-_SUMMARY_PUT_BG = "#f8d7da" # Pink for PUT summary row
-_SUMMARY_CALL_BG = "#cfe2ff" # Light blue for CALL summary row
-_OI_BG_P = "#fce4ec"        # PUT OI column slightly darker
-_OI_BG_C = "#e3f2fd"        # CALL OI column slightly darker
-_JPX_BG_P = "#fff3e0"       # PUT JPX volume warm tint
-_JPX_BG_C = "#e8f5e9"       # CALL JPX volume cool tint
-_HEADER_BG = "#f5f5f5"      # Neutral for week OI headers
+_PUT_BG = "#fff0f0"
+_CALL_BG = "#f0f4ff"
+_STRIKE_BG = "#fffde7"
+_SUMMARY_PUT_BG = "#f8d7da"
+_SUMMARY_CALL_BG = "#cfe2ff"
+_OI_BG_P = "#fce4ec"
+_OI_BG_C = "#e3f2fd"
+_JPX_BG_P = "#fff3e0"
+_JPX_BG_C = "#e8f5e9"
 
 
 def render_option_strike_table(
@@ -38,7 +36,7 @@ def render_option_strike_table(
     week: WeekDefinition,
     tab_label: str = "",
 ) -> None:
-    """Render option table (styled) + detail panel (right)."""
+    """Render option table (styled) + navigator + detail panel."""
     title = f"日経225オプション ({week.label})"
     if tab_label and tab_label != "全セッション合計":
         title += f"  [{tab_label}]"
@@ -48,30 +46,67 @@ def render_option_strike_table(
         st.warning("オプションデータがありません。")
         return
 
-    # Build ordered column list
+    # ====== 1. Main Styler table (full data, read-only) ======
     ordered_cols = _build_column_order(week)
     df = _build_display_dataframe(rows, week, ordered_cols)
+    styled = _apply_styling(df, week)
 
-    # Apply styling
-    styled = _apply_styling(df, week, ordered_cols)
+    st.dataframe(
+        styled,
+        use_container_width=True,
+        height=min(len(df) * 35 + 60, 900),
+    )
 
-    # Layout: table (left 75%) | detail (right 25%)
-    left_col, right_col = st.columns([3, 1])
+    # ====== 2. Navigator grid + Detail panel (side by side) ======
+    st.markdown("---")
+    st.caption("行使価格ナビゲーター — セルをクリックで詳細表示")
 
-    with left_col:
-        st.dataframe(
-            styled,
+    nav_left, nav_right = st.columns([2, 1])
+
+    # Build navigator DataFrame
+    nav_df, nav_meta = _build_navigator_df(rows, week)
+
+    with nav_left:
+        nav_key = f"nav_{tab_label}"
+        event = st.dataframe(
+            nav_df,
             use_container_width=True,
-            height=min(len(df) * 35 + 60, 900),
+            height=min(len(nav_df) * 35 + 50, 500),
+            on_select="rerun",
+            selection_mode="single-cell",
+            key=nav_key,
+            column_config=_nav_column_config(nav_df),
         )
 
-    with right_col:
-        _render_detail_panel_selectbox(rows, week, tab_label)
+    # Parse navigator cell selection
+    selected_strike_idx = None
+    selected_date = None
+    selected_type = None
+
+    if event and event.selection and event.selection.cells:
+        cell = event.selection.cells[0]
+        df_row_idx = cell[0]
+        col_name = cell[1]
+
+        if 0 <= df_row_idx < len(nav_meta):
+            selected_strike_idx = nav_meta[df_row_idx]
+
+        if col_name and col_name != "行使価格":
+            selected_date, selected_type = _parse_nav_col(col_name, week)
+
+    with nav_right:
+        _render_detail_panel(
+            rows, week,
+            selected_strike_idx, selected_date, selected_type,
+            tab_label,
+        )
 
     _render_option_summary(rows)
 
 
-# --- Column name helpers ---
+# =====================================================================
+# Column name helpers
+# =====================================================================
 
 def _day_col(td: date, prefix: str) -> str:
     dow = _DOW_JP[td.weekday()]
@@ -90,13 +125,14 @@ def _oi_chg_col(td: date, prefix: str) -> str:
     return f"{prefix}増{td.strftime('%d')}"
 
 
-# --- Column order ---
+# =====================================================================
+# Main table column order
+# =====================================================================
 
 def _build_column_order(week: WeekDefinition) -> list[str]:
-    """Build explicit column order: PUT side | 行使価格 | CALL side."""
+    """PUT side | 行使価格 | CALL side."""
     cols = []
 
-    # PUT side (left to right)
     cols.append("P前週L")
     cols.append("P前週S")
     for td in week.trading_days:
@@ -108,10 +144,8 @@ def _build_column_order(week: WeekDefinition) -> list[str]:
     cols.append("P今週L")
     cols.append("P今週S")
 
-    # Center
     cols.append("行使価格")
 
-    # CALL side (mirror)
     cols.append("C今週L")
     cols.append("C今週S")
     cols.append("C計")
@@ -126,16 +160,16 @@ def _build_column_order(week: WeekDefinition) -> list[str]:
     return cols
 
 
-# --- Styling ---
+# =====================================================================
+# Styler for main table
+# =====================================================================
 
 def _apply_styling(
     df: pd.DataFrame,
     week: WeekDefinition,
-    ordered_cols: list[str],
 ) -> pd.io.formats.style.Styler:
-    """Apply comprehensive styling: background colors, number formatting, alignment."""
+    """Color coding + number formatting."""
 
-    # Column classification
     put_day_cols = set(_day_col(td, "P") for td in week.trading_days)
     call_day_cols = set(_day_col(td, "C") for td in week.trading_days)
     put_jpx_cols = set(_jpx_vol_col(td, "P") for td in week.trading_days)
@@ -150,46 +184,30 @@ def _apply_styling(
     signed_cols = put_chg_cols | call_chg_cols
 
     def _cell_style(row_idx, col):
-        """Determine background color for a cell."""
-        # Summary rows
-        if row_idx == 0:  # PUT合計
+        if row_idx == 0:
             return f"background-color: {_SUMMARY_PUT_BG}; font-weight: bold"
-        if row_idx == 1:  # CALL合計
+        if row_idx == 1:
             return f"background-color: {_SUMMARY_CALL_BG}; font-weight: bold"
-
-        # Strike price column
         if col == "行使価格":
             return f"background-color: {_STRIKE_BG}; font-weight: bold; text-align: center"
-
-        # PUT side
         if col in put_day_cols or col in put_week_oi:
             return f"background-color: {_PUT_BG}"
         if col in put_jpx_cols:
             return f"background-color: {_JPX_BG_P}"
-        if col in put_oi_cols:
+        if col in put_oi_cols or col in put_chg_cols:
             return f"background-color: {_OI_BG_P}"
-        if col in put_chg_cols:
-            return f"background-color: {_OI_BG_P}"
-
-        # CALL side
         if col in call_day_cols or col in call_week_oi:
             return f"background-color: {_CALL_BG}"
         if col in call_jpx_cols:
             return f"background-color: {_JPX_BG_C}"
-        if col in call_oi_cols:
+        if col in call_oi_cols or col in call_chg_cols:
             return f"background-color: {_OI_BG_C}"
-        if col in call_chg_cols:
-            return f"background-color: {_OI_BG_C}"
-
         return ""
 
     def _apply_cell_colors(s):
-        """Apply per-cell background colors."""
-        row_idx = s.name
-        return [_cell_style(row_idx, col) for col in s.index]
+        return [_cell_style(s.name, col) for col in s.index]
 
     def _color_signed(val):
-        """Green for positive, red for negative OI changes."""
         if pd.isna(val):
             return ""
         try:
@@ -204,18 +222,12 @@ def _apply_styling(
 
     styled = df.style.apply(_apply_cell_colors, axis=1)
 
-    # Signed coloring for OI change columns (participant rows only)
-    all_chg = list(put_chg_cols | call_chg_cols)
-    valid_chg = [c for c in all_chg if c in df.columns]
+    valid_chg = [c for c in signed_cols if c in df.columns]
     if valid_chg:
         participant_idx = list(range(_SUMMARY_ROWS, len(df)))
         if participant_idx:
-            styled = styled.map(
-                _color_signed,
-                subset=(participant_idx, valid_chg),
-            )
+            styled = styled.map(_color_signed, subset=(participant_idx, valid_chg))
 
-    # Number formatting
     fmt_int = lambda v: f"{int(v):,}" if pd.notna(v) and v != "" else "-"
     fmt_signed = lambda v: f"{int(v):+,}" if pd.notna(v) and v != "" else "-"
 
@@ -230,45 +242,31 @@ def _apply_styling(
     return styled
 
 
-# --- DataFrame building ---
+# =====================================================================
+# Main table DataFrame
+# =====================================================================
 
 def _build_display_dataframe(
     rows: list[OptionStrikeRow],
     week: WeekDefinition,
     ordered_cols: list[str],
 ) -> pd.DataFrame:
-    """Build DataFrame with summary rows + one row per strike.
-
-    Row 0: PUT合計 (all-strike totals for PUT side)
-    Row 1: CALL合計 (all-strike totals for CALL side)
-    Row 2+: individual strikes (sorted by strike price)
-    """
     summary_rows = _build_summary_rows(rows, week)
-    records = []
-    for row in rows:
-        rec = _build_volume_row(row, week)
-        records.append(rec)
-
-    df = pd.DataFrame(summary_rows + records, columns=ordered_cols)
-    return df
+    records = [_build_volume_row(row, week) for row in rows]
+    return pd.DataFrame(summary_rows + records, columns=ordered_cols)
 
 
-def _build_summary_rows(
-    rows: list[OptionStrikeRow],
-    week: WeekDefinition,
-) -> list[dict]:
-    """Build PUT合計 and CALL合計 summary rows."""
+def _build_summary_rows(rows, week):
     put_rec = {"行使価格": "PUT合計"}
     call_rec = {"行使価格": "CALL合計"}
 
-    # Initialize all week-level OI cols to None
     for col in ("P前週L", "P前週S", "P今週L", "P今週S",
                 "C前週L", "C前週S", "C今週L", "C今週S"):
         put_rec[col] = None
         call_rec[col] = None
 
-    put_total_week = 0.0
-    call_total_week = 0.0
+    put_total = 0.0
+    call_total = 0.0
 
     for td in week.trading_days:
         p_vol = sum(r.put_daily_volumes.get(td, 0) for r in rows)
@@ -280,7 +278,6 @@ def _build_summary_rows(
         p_chg = sum(r.put_daily_oi_change.get(td, 0) for r in rows)
         c_chg = sum(r.call_daily_oi_change.get(td, 0) for r in rows)
 
-        # PUT summary row: only PUT columns populated
         put_rec[_day_col(td, "P")] = p_vol or None
         put_rec[_jpx_vol_col(td, "P")] = p_jpx or None
         put_rec[_oi_col(td, "P")] = p_oi or None
@@ -290,7 +287,6 @@ def _build_summary_rows(
         put_rec[_oi_col(td, "C")] = None
         put_rec[_oi_chg_col(td, "C")] = None
 
-        # CALL summary row: only CALL columns populated
         call_rec[_day_col(td, "C")] = c_vol or None
         call_rec[_jpx_vol_col(td, "C")] = c_jpx or None
         call_rec[_oi_col(td, "C")] = c_oi or None
@@ -300,25 +296,19 @@ def _build_summary_rows(
         call_rec[_oi_col(td, "P")] = None
         call_rec[_oi_chg_col(td, "P")] = None
 
-        put_total_week += p_vol
-        call_total_week += c_vol
+        put_total += p_vol
+        call_total += c_vol
 
-    put_rec["P計"] = put_total_week or None
+    put_rec["P計"] = put_total or None
     put_rec["C計"] = None
     call_rec["P計"] = None
-    call_rec["C計"] = call_total_week or None
+    call_rec["C計"] = call_total or None
 
     return [put_rec, call_rec]
 
 
-def _build_volume_row(
-    row: OptionStrikeRow,
-    week: WeekDefinition,
-) -> dict:
-    """Build the data row for a single strike price."""
+def _build_volume_row(row, week):
     rec = {}
-
-    # --- PUT side ---
     rec["P前週L"] = row.put_start_oi_long
     rec["P前週S"] = row.put_start_oi_short
 
@@ -332,10 +322,8 @@ def _build_volume_row(
     rec["P今週L"] = row.put_end_oi_long
     rec["P今週S"] = row.put_end_oi_short
 
-    # --- Strike price (center) ---
     rec["行使価格"] = f"{row.strike_price:,}"
 
-    # --- CALL side ---
     rec["C今週L"] = row.call_end_oi_long
     rec["C今週S"] = row.call_end_oi_short
     rec["C計"] = row.call_week_total
@@ -352,67 +340,122 @@ def _build_volume_row(
     return rec
 
 
-# --- Detail panel (selectbox-based, replaces click-based) ---
+# =====================================================================
+# Navigator grid (compact, clickable)
+# =====================================================================
 
-def _render_detail_panel_selectbox(
+def _nav_day_label(td: date) -> str:
+    return f"{td.strftime('%m/%d')}({_DOW_JP[td.weekday()]})"
+
+
+def _build_navigator_df(
     rows: list[OptionStrikeRow],
     week: WeekDefinition,
+) -> tuple[pd.DataFrame, list[int]]:
+    """Build a compact strike x date grid showing P/C volumes.
+
+    Columns: 行使価格 | P{date1} | C{date1} | P{date2} | C{date2} | ...
+    Returns (DataFrame, row_index_map) where row_index_map[i] = index into rows list.
+    """
+    col_order = ["行使価格"]
+    for td in week.trading_days:
+        col_order.append(f"P {_nav_day_label(td)}")
+        col_order.append(f"C {_nav_day_label(td)}")
+
+    records = []
+    meta = []  # maps nav row index -> rows list index
+
+    for idx, row in enumerate(rows):
+        # Skip strikes with zero activity
+        has_activity = (
+            any(row.put_daily_volumes.get(td, 0) > 0 for td in week.trading_days)
+            or any(row.call_daily_volumes.get(td, 0) > 0 for td in week.trading_days)
+            or any(row.put_daily_oi.get(td, 0) > 0 for td in week.trading_days)
+            or any(row.call_daily_oi.get(td, 0) > 0 for td in week.trading_days)
+        )
+        if not has_activity:
+            continue
+
+        rec = {"行使価格": f"{row.strike_price:,}"}
+        for td in week.trading_days:
+            p_vol = row.put_daily_volumes.get(td, 0)
+            c_vol = row.call_daily_volumes.get(td, 0)
+            rec[f"P {_nav_day_label(td)}"] = p_vol if p_vol else None
+            rec[f"C {_nav_day_label(td)}"] = c_vol if c_vol else None
+        records.append(rec)
+        meta.append(idx)
+
+    df = pd.DataFrame(records, columns=col_order)
+    return df, meta
+
+
+def _nav_column_config(df: pd.DataFrame) -> dict:
+    """Column config for navigator grid."""
+    cfg = {}
+    cfg["行使価格"] = st.column_config.TextColumn("行使価格", width="small")
+    for col in df.columns:
+        if col == "行使価格":
+            continue
+        cfg[col] = st.column_config.NumberColumn(col, format="%d", width="small")
+    return cfg
+
+
+def _parse_nav_col(
+    col_name: str,
+    week: WeekDefinition,
+) -> tuple[date | None, str | None]:
+    """Parse navigator column name to (date, 'PUT'/'CALL')."""
+    for td in week.trading_days:
+        label = _nav_day_label(td)
+        if col_name == f"P {label}":
+            return td, "PUT"
+        if col_name == f"C {label}":
+            return td, "CALL"
+    return None, None
+
+
+# =====================================================================
+# Detail panel
+# =====================================================================
+
+def _render_detail_panel(
+    rows: list[OptionStrikeRow],
+    week: WeekDefinition,
+    strike_idx: int | None,
+    selected_date: date | None,
+    selected_type: str | None,
     tab_label: str,
 ) -> None:
-    """Right panel: user selects strike/date/type via selectbox."""
+    """Right panel: show participant breakdown + daily OI for selected cell."""
     st.markdown("**詳細パネル**")
 
-    if not rows:
+    if strike_idx is None or strike_idx >= len(rows):
+        st.caption("ナビゲーターのセルをクリック")
         return
 
-    prefix = f"det_{tab_label}"
-
-    # Option type
-    opt_type = st.radio(
-        "タイプ", ["PUT", "CALL"],
-        horizontal=True, key=f"{prefix}_type",
-    )
-
-    # Strike selection
-    strike_labels = [f"{r.strike_price:,}" for r in rows]
-    # Default to ATM-ish (middle)
-    default_idx = len(rows) // 2
-    strike_choice = st.selectbox(
-        "行使価格", strike_labels,
-        index=default_idx, key=f"{prefix}_strike",
-    )
-    if strike_choice is None:
-        return
-    strike_idx = strike_labels.index(strike_choice)
     target_row = rows[strike_idx]
 
-    # Date selection
-    day_labels = [f"{td.strftime('%m/%d')}({_DOW_JP[td.weekday()]})"
-                  for td in week.trading_days]
-    day_choice = st.selectbox(
-        "日付", day_labels,
-        index=len(day_labels) - 1,  # Default to latest day
-        key=f"{prefix}_day",
-    )
-    if day_choice is None:
-        return
-    selected_date = week.trading_days[day_labels.index(day_choice)]
+    if selected_type is None:
+        selected_type = "CALL"
+
+    if selected_date is None:
+        # Fallback: let user pick date
+        day_labels = [f"{td.strftime('%m/%d')}({_DOW_JP[td.weekday()]})"
+                      for td in week.trading_days]
+        prefix = f"bd_{tab_label}"
+        day_choice = st.selectbox("日付", day_labels, key=f"{prefix}_day_r")
+        if day_choice is None:
+            return
+        selected_date = week.trading_days[day_labels.index(day_choice)]
 
     dow = _DOW_JP[selected_date.weekday()]
     date_str = f"{selected_date.strftime('%m/%d')}({dow})"
 
-    st.markdown("---")
-    _render_participant_breakdown(target_row, opt_type, selected_date, date_str)
-    _render_oi_detail(target_row, opt_type, selected_date)
+    _render_participant_breakdown(target_row, selected_type, selected_date, date_str)
+    _render_oi_detail(target_row, selected_type, selected_date)
 
 
-def _render_participant_breakdown(
-    row: OptionStrikeRow,
-    option_type: str,
-    td: date,
-    date_str: str,
-) -> None:
-    """Show per-participant volume breakdown."""
+def _render_participant_breakdown(row, option_type, td, date_str):
     is_put = option_type == "PUT"
     breakdown = (row.put_daily_breakdown if is_put else row.call_daily_breakdown).get(td, [])
 
@@ -438,12 +481,7 @@ def _render_participant_breakdown(
     )
 
 
-def _render_oi_detail(
-    row: OptionStrikeRow,
-    option_type: str,
-    td: date,
-) -> None:
-    """Show daily OI balance detail below participant breakdown."""
+def _render_oi_detail(row, option_type, td):
     is_put = option_type == "PUT"
     oi = (row.put_daily_oi if is_put else row.call_daily_oi).get(td)
     chg = (row.put_daily_oi_change if is_put else row.call_daily_oi_change).get(td)
@@ -465,7 +503,6 @@ def _render_oi_detail(
 
 
 def _render_option_summary(rows: list[OptionStrikeRow]) -> None:
-    """Summary stats below the table."""
     st.markdown("---")
     cols = st.columns(4)
 
