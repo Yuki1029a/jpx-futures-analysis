@@ -1,10 +1,8 @@
-"""Option strike-price table with Styler rendering + clickable navigator.
+"""Option strike-price table — unified single table with cell click → detail.
 
-Architecture:
-  1. Main table (Styler via st.dataframe) — color-coded, formatted, with
-     行使価格 as DataFrame index (pinned left in Streamlit's grid).
-  2. Navigator grid (st.dataframe on_select) — compact strike x date grid
-     showing daily volumes + OI per strike. Click a cell → detail panel.
+Single st.dataframe with on_select: click any cell to see participant
+breakdown in the detail panel. 行使価格 as index (pinned left on scroll).
+column_config for number formatting. No separate navigator needed.
 """
 from __future__ import annotations
 
@@ -17,24 +15,13 @@ _DOW_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
 _SUMMARY_ROWS = 2
 
-# --- Color palette ---
-_PUT_BG = "#fff0f0"
-_CALL_BG = "#f0f4ff"
-_STRIKE_BG = "#fffde7"
-_SUMMARY_PUT_BG = "#f8d7da"
-_SUMMARY_CALL_BG = "#cfe2ff"
-_OI_BG_P = "#fce4ec"
-_OI_BG_C = "#e3f2fd"
-_JPX_BG_P = "#fff3e0"
-_JPX_BG_C = "#e8f5e9"
-
 
 def render_option_strike_table(
     rows: list[OptionStrikeRow],
     week: WeekDefinition,
     tab_label: str = "",
 ) -> None:
-    """Render option table (styled) + navigator + detail panel."""
+    """Render single interactive option table + detail panel."""
     title = f"日経225オプション ({week.label})"
     if tab_label and tab_label != "全セッション合計":
         title += f"  [{tab_label}]"
@@ -44,56 +31,65 @@ def render_option_strike_table(
         st.warning("オプションデータがありません。")
         return
 
-    # ====== 1. Main table with 行使価格 as index (pinned left) ======
+    # Build DataFrame
     ordered_cols = _build_column_order(week)
     df = _build_display_dataframe(rows, week, ordered_cols)
 
-    # Set 行使価格 as index → Streamlit pins index columns on left
-    df = df.set_index("行使価格")
+    # Column config for formatting
+    col_config = _build_column_config(df, week)
 
-    styled = _apply_styling(df, week)
-    st.dataframe(
-        styled,
-        use_container_width=True,
-        height=min(len(df) * 35 + 60, 900),
-    )
+    # Hide metadata column
+    col_config["_strike_idx"] = None
 
-    # ====== 2. Navigator grid + Detail panel (side by side) ======
-    st.markdown("---")
-    st.caption("行使価格ナビゲーター — セルをクリックで詳細表示")
+    # Build column order for display (exclude hidden cols)
+    display_cols = [c for c in ordered_cols if c != "行使価格"]
 
-    nav_left, nav_right = st.columns([2, 1])
+    # Layout: table (left) | detail (right)
+    left_col, right_col = st.columns([3, 1])
 
-    nav_df, nav_meta = _build_navigator_df(rows, week)
-
-    with nav_left:
-        nav_key = f"nav_{tab_label}"
+    with left_col:
+        table_key = f"opt_table_{tab_label}"
         event = st.dataframe(
-            nav_df,
+            df,
             use_container_width=True,
-            height=min(len(nav_df) * 35 + 50, 500),
+            height=min(len(df) * 35 + 60, 900),
             on_select="rerun",
             selection_mode="single-cell",
-            key=nav_key,
-            column_config=_nav_column_config(nav_df),
+            key=table_key,
+            column_config=col_config,
+            column_order=display_cols,
         )
 
+    # Parse cell selection
     selected_strike_idx = None
     selected_date = None
     selected_type = None
+
+    # Classify columns
+    put_cols, call_cols = _classify_columns(week)
 
     if event and event.selection and event.selection.cells:
         cell = event.selection.cells[0]
         df_row_idx = cell[0]
         col_name = cell[1]
 
-        if 0 <= df_row_idx < len(nav_meta):
-            selected_strike_idx = nav_meta[df_row_idx]
+        if 0 <= df_row_idx < len(df):
+            strike_idx_val = df.iloc[df_row_idx].get("_strike_idx")
+            if strike_idx_val is not None and not pd.isna(strike_idx_val):
+                selected_strike_idx = int(strike_idx_val)
 
-        if col_name and col_name != "行使価格":
-            selected_date, selected_type = _parse_nav_col(col_name, week)
+            if col_name in put_cols:
+                selected_type = "PUT"
+                selected_date = _col_to_date(col_name, week)
+            elif col_name in call_cols:
+                selected_type = "CALL"
+                selected_date = _col_to_date(col_name, week)
+            elif col_name and col_name.startswith("P"):
+                selected_type = "PUT"
+            elif col_name and col_name.startswith("C"):
+                selected_type = "CALL"
 
-    with nav_right:
+    with right_col:
         _render_detail_panel(
             rows, week,
             selected_strike_idx, selected_date, selected_type,
@@ -124,8 +120,30 @@ def _oi_chg_col(td: date, prefix: str) -> str:
     return f"{prefix}増{td.strftime('%d')}"
 
 
+def _classify_columns(week: WeekDefinition) -> tuple[set[str], set[str]]:
+    """Return (put_cols, call_cols) sets for all per-date columns."""
+    put_cols = set()
+    call_cols = set()
+    for td in week.trading_days:
+        put_cols |= {_day_col(td, "P"), _jpx_vol_col(td, "P"),
+                     _oi_col(td, "P"), _oi_chg_col(td, "P")}
+        call_cols |= {_day_col(td, "C"), _jpx_vol_col(td, "C"),
+                      _oi_col(td, "C"), _oi_chg_col(td, "C")}
+    return put_cols, call_cols
+
+
+def _col_to_date(col_name: str, week: WeekDefinition) -> date | None:
+    """Resolve any per-date column name to a date."""
+    for td in week.trading_days:
+        for prefix in ("P", "C"):
+            if col_name in (_day_col(td, prefix), _jpx_vol_col(td, prefix),
+                            _oi_col(td, prefix), _oi_chg_col(td, prefix)):
+                return td
+    return None
+
+
 # =====================================================================
-# Main table column order (excluding 行使価格 which becomes index)
+# Column order
 # =====================================================================
 
 def _build_column_order(week: WeekDefinition) -> list[str]:
@@ -160,92 +178,27 @@ def _build_column_order(week: WeekDefinition) -> list[str]:
 
 
 # =====================================================================
-# Styler for main table
+# Column config
 # =====================================================================
 
-def _apply_styling(
-    df: pd.DataFrame,
-    week: WeekDefinition,
-) -> pd.io.formats.style.Styler:
-    """Color coding + number formatting.
+def _build_column_config(df: pd.DataFrame, week: WeekDefinition) -> dict:
+    """Build column_config for number formatting."""
+    cfg = {}
 
-    Note: st.dataframe renders Styler with background colors intact.
-    """
-    put_day_cols = set(_day_col(td, "P") for td in week.trading_days)
-    call_day_cols = set(_day_col(td, "C") for td in week.trading_days)
-    put_jpx_cols = set(_jpx_vol_col(td, "P") for td in week.trading_days)
-    call_jpx_cols = set(_jpx_vol_col(td, "C") for td in week.trading_days)
-    put_oi_cols = set(_oi_col(td, "P") for td in week.trading_days)
-    call_oi_cols = set(_oi_col(td, "C") for td in week.trading_days)
-    put_chg_cols = set(_oi_chg_col(td, "P") for td in week.trading_days)
-    call_chg_cols = set(_oi_chg_col(td, "C") for td in week.trading_days)
-    put_week_oi = {"P前週L", "P前週S", "P今週L", "P今週S", "P計"}
-    call_week_oi = {"C前週L", "C前週S", "C今週L", "C今週S", "C計"}
+    # 行使価格 — pinned text column (index)
+    cfg["行使価格"] = st.column_config.TextColumn("行使価格", pinned=True)
 
-    signed_cols = put_chg_cols | call_chg_cols
-
-    # Index labels for summary rows
-    summary_put_label = df.index[0]   # "PUT合計"
-    summary_call_label = df.index[1]  # "CALL合計"
-
-    def _cell_style(row_label, col, val):
-        """Combined background + text color for a single cell."""
-        parts = []
-
-        # Background color
-        if row_label == summary_put_label:
-            parts.append(f"background-color: {_SUMMARY_PUT_BG}; font-weight: bold")
-        elif row_label == summary_call_label:
-            parts.append(f"background-color: {_SUMMARY_CALL_BG}; font-weight: bold")
-        elif col in put_day_cols or col in put_week_oi:
-            parts.append(f"background-color: {_PUT_BG}")
-        elif col in put_jpx_cols:
-            parts.append(f"background-color: {_JPX_BG_P}")
-        elif col in put_oi_cols or col in put_chg_cols:
-            parts.append(f"background-color: {_OI_BG_P}")
-        elif col in call_day_cols or col in call_week_oi:
-            parts.append(f"background-color: {_CALL_BG}")
-        elif col in call_jpx_cols:
-            parts.append(f"background-color: {_JPX_BG_C}")
-        elif col in call_oi_cols or col in call_chg_cols:
-            parts.append(f"background-color: {_OI_BG_C}")
-
-        # Signed text color for OI change columns (non-summary rows)
-        if (col in signed_cols
-                and row_label != summary_put_label
-                and row_label != summary_call_label):
-            try:
-                if pd.notna(val):
-                    n = float(val)
-                    if n > 0:
-                        parts.append("color: #006100")
-                    elif n < 0:
-                        parts.append("color: #9c0006")
-            except (ValueError, TypeError):
-                pass
-
-        return "; ".join(parts)
-
-    def _apply_all_styles(s):
-        """Apply background + text color for each cell in a row."""
-        return [_cell_style(s.name, col, s[col]) for col in s.index]
-
-    styled = df.style.apply(_apply_all_styles, axis=1)
-
-    fmt_int = lambda v: f"{int(v):,}" if pd.notna(v) and v != "" else "-"
-    fmt_signed = lambda v: f"{int(v):+,}" if pd.notna(v) and v != "" else "-"
-
+    # All numeric columns get NumberColumn with comma formatting
     for col in df.columns:
-        if col in signed_cols:
-            styled = styled.format(fmt_signed, subset=[col])
-        else:
-            styled = styled.format(fmt_int, subset=[col])
+        if col in ("行使価格", "_strike_idx"):
+            continue
+        cfg[col] = st.column_config.NumberColumn(col, format="%d")
 
-    return styled
+    return cfg
 
 
 # =====================================================================
-# Main table DataFrame
+# DataFrame building
 # =====================================================================
 
 def _build_display_dataframe(
@@ -253,14 +206,24 @@ def _build_display_dataframe(
     week: WeekDefinition,
     ordered_cols: list[str],
 ) -> pd.DataFrame:
+    """Build DataFrame with summary rows + one row per strike.
+
+    Row 0: PUT合計, Row 1: CALL合計, Row 2+: individual strikes.
+    """
     summary_rows = _build_summary_rows(rows, week)
-    records = [_build_volume_row(row, week) for row in rows]
-    return pd.DataFrame(summary_rows + records, columns=ordered_cols)
+    records = []
+    for idx, row in enumerate(rows):
+        rec = _build_volume_row(row, week)
+        rec["_strike_idx"] = idx
+        records.append(rec)
+
+    all_cols = ordered_cols + ["_strike_idx"]
+    return pd.DataFrame(summary_rows + records, columns=all_cols)
 
 
 def _build_summary_rows(rows, week):
-    put_rec = {"行使価格": "PUT合計"}
-    call_rec = {"行使価格": "CALL合計"}
+    put_rec = {"行使価格": "PUT合計", "_strike_idx": None}
+    call_rec = {"行使価格": "CALL合計", "_strike_idx": None}
 
     for col in ("P前週L", "P前週S", "P今週L", "P今週S",
                 "C前週L", "C前週S", "C今週L", "C今週S"):
@@ -343,86 +306,6 @@ def _build_volume_row(row, week):
 
 
 # =====================================================================
-# Navigator grid (compact, clickable) — daily volume + OI
-# =====================================================================
-
-def _nav_day_label(td: date) -> str:
-    return f"{td.strftime('%m/%d')}({_DOW_JP[td.weekday()]})"
-
-
-def _build_navigator_df(
-    rows: list[OptionStrikeRow],
-    week: WeekDefinition,
-) -> tuple[pd.DataFrame, list[int]]:
-    """Build compact navigator: strike x (P volume, P OI, C OI, C volume) per day.
-
-    Columns per day: P高{dd} P残{dd} | C残{dd} C高{dd}
-    Returns (DataFrame, row_index_map).
-    """
-    col_order = ["行使価格"]
-    for td in week.trading_days:
-        dd = td.strftime("%d")
-        col_order.append(f"P高{dd}")
-        col_order.append(f"P残{dd}")
-        col_order.append(f"C残{dd}")
-        col_order.append(f"C高{dd}")
-
-    records = []
-    meta = []
-
-    for idx, row in enumerate(rows):
-        has_activity = (
-            any(row.put_daily_volumes.get(td, 0) > 0 for td in week.trading_days)
-            or any(row.call_daily_volumes.get(td, 0) > 0 for td in week.trading_days)
-            or any(row.put_daily_oi.get(td, 0) > 0 for td in week.trading_days)
-            or any(row.call_daily_oi.get(td, 0) > 0 for td in week.trading_days)
-        )
-        if not has_activity:
-            continue
-
-        rec = {"行使価格": f"{row.strike_price:,}"}
-        for td in week.trading_days:
-            dd = td.strftime("%d")
-            p_vol = row.put_daily_volumes.get(td, 0)
-            p_oi = row.put_daily_oi.get(td, 0)
-            c_vol = row.call_daily_volumes.get(td, 0)
-            c_oi = row.call_daily_oi.get(td, 0)
-            rec[f"P高{dd}"] = p_vol if p_vol else None
-            rec[f"P残{dd}"] = p_oi if p_oi else None
-            rec[f"C残{dd}"] = c_oi if c_oi else None
-            rec[f"C高{dd}"] = c_vol if c_vol else None
-        records.append(rec)
-        meta.append(idx)
-
-    df = pd.DataFrame(records, columns=col_order)
-    return df, meta
-
-
-def _nav_column_config(df: pd.DataFrame) -> dict:
-    cfg = {}
-    cfg["行使価格"] = st.column_config.TextColumn("行使価格", width="small")
-    for col in df.columns:
-        if col == "行使価格":
-            continue
-        cfg[col] = st.column_config.NumberColumn(col, format="%d", width="small")
-    return cfg
-
-
-def _parse_nav_col(
-    col_name: str,
-    week: WeekDefinition,
-) -> tuple[date | None, str | None]:
-    """Parse navigator column name to (date, 'PUT'/'CALL')."""
-    for td in week.trading_days:
-        dd = td.strftime("%d")
-        if col_name in (f"P高{dd}", f"P残{dd}"):
-            return td, "PUT"
-        if col_name in (f"C高{dd}", f"C残{dd}"):
-            return td, "CALL"
-    return None, None
-
-
-# =====================================================================
 # Detail panel
 # =====================================================================
 
@@ -437,7 +320,7 @@ def _render_detail_panel(
     st.markdown("**詳細パネル**")
 
     if strike_idx is None or strike_idx >= len(rows):
-        st.caption("ナビゲーターのセルをクリック")
+        st.caption("テーブルのセルをクリック")
         return
 
     target_row = rows[strike_idx]
