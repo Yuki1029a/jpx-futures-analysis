@@ -272,20 +272,32 @@ def _render_summary_stats(rows: list[WeeklyParticipantRow]) -> None:
     st.markdown("---")
     cols = st.columns(4)
 
-    buyers = sum(1 for r in rows if r.inferred_direction == "BUY")
-    sellers = sum(1 for r in rows if r.inferred_direction == "SELL")
     total_vol = sum(sum(r.daily_volumes.values()) for r in rows)
-    total_net = sum(r.oi_net_change for r in rows if r.oi_net_change is not None)
+    oi_available = any(r.oi_net_change is not None for r in rows)
 
-    with cols[0]:
-        st.metric("買い方", buyers)
-    with cols[1]:
-        st.metric("売り方", sellers)
-    with cols[2]:
-        st.metric("週間出来高計", f"{int(total_vol):,}")
-    with cols[3]:
-        delta_color = "normal" if total_net >= 0 else "inverse"
-        st.metric("全体Net増減", f"{int(total_net):+,}", delta_color=delta_color)
+    if oi_available:
+        buyers = sum(1 for r in rows if r.inferred_direction == "BUY")
+        sellers = sum(1 for r in rows if r.inferred_direction == "SELL")
+        total_net = sum(r.oi_net_change for r in rows if r.oi_net_change is not None)
+
+        with cols[0]:
+            st.metric("買い方", buyers)
+        with cols[1]:
+            st.metric("売り方", sellers)
+        with cols[2]:
+            st.metric("週間出来高計", f"{int(total_vol):,}")
+        with cols[3]:
+            delta_color = "normal" if total_net >= 0 else "inverse"
+            st.metric("全体Net増減", f"{int(total_net):+,}", delta_color=delta_color)
+    else:
+        with cols[0]:
+            st.metric("週間出来高計", f"{int(total_vol):,}")
+        with cols[1]:
+            st.metric("買い方", "未発表")
+        with cols[2]:
+            st.metric("売り方", "未発表")
+        with cols[3]:
+            st.metric("全体Net増減", "未発表")
 
 
 def _direction_label(direction) -> str:

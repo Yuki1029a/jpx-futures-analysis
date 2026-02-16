@@ -2,10 +2,11 @@
 
 Single st.dataframe with on_select: click any cell to see participant
 breakdown in the detail panel. 行使価格 as index (pinned left on scroll).
-column_config for number formatting. No separate navigator needed.
+Pandas Styler for PUT/CALL color coding, zebra stripes, column grouping.
 """
 from __future__ import annotations
 
+import numpy as np
 import streamlit as st
 import pandas as pd
 from datetime import date
@@ -13,7 +14,17 @@ from models import OptionStrikeRow, WeekDefinition
 
 _DOW_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
-_SUMMARY_ROWS = 2
+_SUMMARY_ROWS = 1
+
+# -- Color palette --
+_PUT_BG = "#FFF0F0"          # light red
+_PUT_BG_ALT = "#FFE0E0"     # slightly darker for zebra
+_CALL_BG = "#EEF4FF"        # light blue
+_CALL_BG_ALT = "#DDEAFF"    # slightly darker for zebra
+_STRIKE_BG = "#F5F5DC"      # beige for strike price
+_SUMMARY_PUT = "#FFD0D0"    # summary row PUT
+_SUMMARY_CALL = "#C8DEFF"   # summary row CALL
+_SUMMARY_STRIKE = "#E8E8C0" # summary row strike
 
 
 def render_option_strike_table(
@@ -35,14 +46,22 @@ def render_option_strike_table(
     ordered_cols = _build_column_order(week)
     df = _build_display_dataframe(rows, week, ordered_cols)
 
-    # Column config for formatting
+    # Column config
     col_config = _build_column_config(df, week)
-
-    # Hide metadata column
     col_config["_strike_idx"] = None
 
-    # Build column order for display (exclude hidden cols)
-    display_cols = [c for c in ordered_cols if c != "行使価格"]
+    # Build column order for display (exclude hidden cols only)
+    display_cols = [c for c in ordered_cols if c != "_strike_idx"]
+
+    # Classify columns for styling
+    put_cols_set, call_cols_set = _classify_columns(week)
+    put_static = {"P前週L", "P前週S", "P今週L", "P今週S", "P計"}
+    call_static = {"C前週L", "C前週S", "C今週L", "C今週S", "C計"}
+    all_put = put_cols_set | put_static
+    all_call = call_cols_set | call_static
+
+    # Apply Pandas Styler
+    styled = _apply_styling(df, all_put, all_call, display_cols)
 
     # Layout: table (left) | detail (right)
     left_col, right_col = st.columns([3, 1])
@@ -50,14 +69,13 @@ def render_option_strike_table(
     with left_col:
         table_key = f"opt_table_{tab_label}"
         event = st.dataframe(
-            df,
+            styled,
             use_container_width=True,
             height=min(len(df) * 35 + 60, 900),
             on_select="rerun",
             selection_mode="single-cell",
             key=table_key,
             column_config=col_config,
-            column_order=display_cols,
         )
 
     # Parse cell selection
@@ -65,8 +83,8 @@ def render_option_strike_table(
     selected_date = None
     selected_type = None
 
-    # Classify columns
-    put_cols, call_cols = _classify_columns(week)
+    # Reuse classified columns for selection
+    put_cols, call_cols = put_cols_set, call_cols_set
 
     if event and event.selection and event.selection.cells:
         cell = event.selection.cells[0]
@@ -182,19 +200,78 @@ def _build_column_order(week: WeekDefinition) -> list[str]:
 # =====================================================================
 
 def _build_column_config(df: pd.DataFrame, week: WeekDefinition) -> dict:
-    """Build column_config for number formatting."""
+    """Build column_config — pinned strike column only.
+
+    Number formatting is handled by Styler.format(), not column_config,
+    to avoid conflicts between Styler and column_config.
+    """
     cfg = {}
-
-    # 行使価格 — pinned text column (index)
     cfg["行使価格"] = st.column_config.TextColumn("行使価格", pinned=True)
-
-    # All numeric columns get NumberColumn with comma formatting
-    for col in df.columns:
-        if col in ("行使価格", "_strike_idx"):
-            continue
-        cfg[col] = st.column_config.NumberColumn(col, format="%d")
-
     return cfg
+
+
+# =====================================================================
+# Styling
+# =====================================================================
+
+def _apply_styling(
+    df: pd.DataFrame,
+    put_cols: set[str],
+    call_cols: set[str],
+    display_cols: list[str],
+) -> pd.io.formats.style.Styler:
+    """Apply Pandas Styler for PUT/CALL color coding and zebra stripes."""
+
+    styler = df.style
+
+    # Build background-color map per cell
+    def _color_cells(row):
+        row_idx = row.name  # positional index
+        is_summary = row_idx < _SUMMARY_ROWS
+        is_odd_data = (row_idx - _SUMMARY_ROWS) % 2 == 1  # zebra for data rows
+
+        styles = []
+        for col in row.index:
+            if col == "_strike_idx":
+                styles.append("")
+                continue
+
+            if col == "行使価格":
+                bg = _SUMMARY_STRIKE if is_summary else _STRIKE_BG
+                styles.append(f"background-color: {bg}; font-weight: bold")
+                continue
+
+            if col in put_cols:
+                if is_summary:
+                    bg = _SUMMARY_PUT
+                else:
+                    bg = _PUT_BG_ALT if is_odd_data else _PUT_BG
+                styles.append(f"background-color: {bg}")
+            elif col in call_cols:
+                if is_summary:
+                    bg = _SUMMARY_CALL
+                else:
+                    bg = _CALL_BG_ALT if is_odd_data else _CALL_BG
+                styles.append(f"background-color: {bg}")
+            else:
+                styles.append("")
+
+        return styles
+
+    styler = styler.apply(_color_cells, axis=1)
+
+    # Bold for summary row
+    def _bold_summary(row):
+        if row.name < _SUMMARY_ROWS:
+            return ["font-weight: bold"] * len(row)
+        return [""] * len(row)
+
+    styler = styler.apply(_bold_summary, axis=1)
+
+    # Hide internal metadata column
+    styler = styler.hide(subset=["_strike_idx"], axis="columns")
+
+    return styler
 
 
 # =====================================================================
@@ -206,9 +283,10 @@ def _build_display_dataframe(
     week: WeekDefinition,
     ordered_cols: list[str],
 ) -> pd.DataFrame:
-    """Build DataFrame with summary rows + one row per strike.
+    """Build DataFrame with summary row + one row per strike.
 
-    Row 0: PUT合計, Row 1: CALL合計, Row 2+: individual strikes.
+    Row 0: 合計, Row 1+: individual strikes.
+    Data kept as numeric (float) — formatting is handled by Styler.
     """
     summary_rows = _build_summary_rows(rows, week)
     records = []
@@ -218,17 +296,27 @@ def _build_display_dataframe(
         records.append(rec)
 
     all_cols = ordered_cols + ["_strike_idx"]
-    return pd.DataFrame(summary_rows + records, columns=all_cols)
+    df = pd.DataFrame(summary_rows + records, columns=all_cols)
+
+    # Convert numeric columns to formatted strings (integer + comma).
+    # NaN → empty string. Styler handles color only; formatting done here
+    # because Streamlit ignores Styler.format() for display values.
+    num_cols = [c for c in df.columns if c not in ("行使価格", "_strike_idx")]
+    for c in num_cols:
+        series = pd.to_numeric(df[c], errors="coerce")
+        df[c] = series.apply(
+            lambda v: f"{int(v):,}" if pd.notna(v) else ""
+        )
+
+    return df
 
 
 def _build_summary_rows(rows, week):
-    put_rec = {"行使価格": "PUT合計", "_strike_idx": None}
-    call_rec = {"行使価格": "CALL合計", "_strike_idx": None}
+    rec = {"行使価格": "合計", "_strike_idx": None}
 
     for col in ("P前週L", "P前週S", "P今週L", "P今週S",
                 "C前週L", "C前週S", "C今週L", "C今週S"):
-        put_rec[col] = None
-        call_rec[col] = None
+        rec[col] = None
 
     put_total = 0.0
     call_total = 0.0
@@ -243,33 +331,23 @@ def _build_summary_rows(rows, week):
         p_chg = sum(r.put_daily_oi_change.get(td, 0) for r in rows)
         c_chg = sum(r.call_daily_oi_change.get(td, 0) for r in rows)
 
-        put_rec[_day_col(td, "P")] = p_vol or None
-        put_rec[_jpx_vol_col(td, "P")] = p_jpx or None
-        put_rec[_oi_col(td, "P")] = p_oi or None
-        put_rec[_oi_chg_col(td, "P")] = p_chg or None
-        put_rec[_day_col(td, "C")] = None
-        put_rec[_jpx_vol_col(td, "C")] = None
-        put_rec[_oi_col(td, "C")] = None
-        put_rec[_oi_chg_col(td, "C")] = None
+        rec[_day_col(td, "P")] = p_vol or None
+        rec[_jpx_vol_col(td, "P")] = p_jpx or None
+        rec[_oi_col(td, "P")] = p_oi or None
+        rec[_oi_chg_col(td, "P")] = p_chg or None
 
-        call_rec[_day_col(td, "C")] = c_vol or None
-        call_rec[_jpx_vol_col(td, "C")] = c_jpx or None
-        call_rec[_oi_col(td, "C")] = c_oi or None
-        call_rec[_oi_chg_col(td, "C")] = c_chg or None
-        call_rec[_day_col(td, "P")] = None
-        call_rec[_jpx_vol_col(td, "P")] = None
-        call_rec[_oi_col(td, "P")] = None
-        call_rec[_oi_chg_col(td, "P")] = None
+        rec[_day_col(td, "C")] = c_vol or None
+        rec[_jpx_vol_col(td, "C")] = c_jpx or None
+        rec[_oi_col(td, "C")] = c_oi or None
+        rec[_oi_chg_col(td, "C")] = c_chg or None
 
         put_total += p_vol
         call_total += c_vol
 
-    put_rec["P計"] = put_total or None
-    put_rec["C計"] = None
-    call_rec["P計"] = None
-    call_rec["C計"] = call_total or None
+    rec["P計"] = put_total or None
+    rec["C計"] = call_total or None
 
-    return [put_rec, call_rec]
+    return [rec]
 
 
 def _build_volume_row(row, week):

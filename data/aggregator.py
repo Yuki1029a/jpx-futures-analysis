@@ -261,11 +261,14 @@ def load_weekly_data(
             if pv:
                 dvols[td] = pv.volume
 
-        oi_net_change = e_net - s_net
+        # OI net change and direction require BOTH start and end OI.
+        # For in-progress weeks (end_oi_date=None), end_oi is empty,
+        # so these fields must be None — the data hasn't been published yet.
+        has_both_oi = s_oi is not None and e_oi is not None
+        oi_net_change = (e_net - s_net) if has_both_oi else None
 
-        has_oi = s_oi is not None or e_oi is not None
         direction = None
-        if has_oi:
+        if has_both_oi:
             if oi_net_change > 0:
                 direction = "BUY"
             elif oi_net_change < 0:
@@ -283,7 +286,7 @@ def load_weekly_data(
             end_oi_long=e_long if e_oi else None,
             end_oi_short=e_short if e_oi else None,
             end_oi_net=e_net if e_oi else None,
-            oi_net_change=oi_net_change if has_oi else None,
+            oi_net_change=oi_net_change,
             inferred_direction=direction,
         ))
 
