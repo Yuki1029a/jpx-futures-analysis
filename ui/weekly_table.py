@@ -84,7 +84,6 @@ def _build_display_dataframe(
         if show_oi:
             rec_oi["前週L"] = None
             rec_oi["前週S"] = None
-            rec_oi["前週Net"] = None
         for td, col_name in zip(week.trading_days, day_col_names):
             oi_rec = daily_futures_oi.get(td)
             rec_oi[col_name] = oi_rec.current_oi if oi_rec else None
@@ -94,7 +93,6 @@ def _build_display_dataframe(
         if show_oi:
             rec_oi["今週L"] = None
             rec_oi["今週S"] = None
-            rec_oi["今週Net"] = None
             rec_oi["増減"] = None
             rec_oi["推定買"] = None
             rec_oi["推定売"] = None
@@ -106,7 +104,6 @@ def _build_display_dataframe(
         if show_oi:
             rec_chg["前週L"] = None
             rec_chg["前週S"] = None
-            rec_chg["前週Net"] = None
         for td, col_name in zip(week.trading_days, day_col_names):
             oi_rec = daily_futures_oi.get(td)
             rec_chg[col_name] = oi_rec.net_change if oi_rec else None
@@ -116,7 +113,6 @@ def _build_display_dataframe(
         if show_oi:
             rec_chg["今週L"] = None
             rec_chg["今週S"] = None
-            rec_chg["今週Net"] = None
             rec_chg["増減"] = None
             rec_chg["推定買"] = None
             rec_chg["推定売"] = None
@@ -131,7 +127,6 @@ def _build_display_dataframe(
         if show_oi:
             rec["前週L"] = row.start_oi_long
             rec["前週S"] = row.start_oi_short
-            rec["前週Net"] = row.start_oi_net
 
         weekly_total = 0.0
         for td, col_name in zip(week.trading_days, day_col_names):
@@ -152,7 +147,6 @@ def _build_display_dataframe(
         if show_oi:
             rec["今週L"] = row.end_oi_long
             rec["今週S"] = row.end_oi_short
-            rec["今週Net"] = row.end_oi_net
             rec["増減"] = row.oi_net_change
 
             est_buy = None
@@ -177,12 +171,20 @@ def _apply_table_styling(
     day_cols = [f"{td.strftime('%m/%d')}({_DOW_JP[td.weekday()]})" for td in week.trading_days]
     int_cols = list(day_cols) + ["週間計", "20日平均", "20日最大"]
 
-    net_cols = []
+    signed_cols = []  # columns that should show +/- sign
+    long_cols = set()
+    short_cols = set()
     if show_oi:
         oi_cols = ["前週L", "前週S", "今週L", "今週S"]
-        net_cols = ["前週Net", "今週Net", "増減"]
+        signed_cols = ["増減"]
         est_cols = ["推定買", "推定売"]
-        int_cols += oi_cols + net_cols + est_cols
+        int_cols += oi_cols + signed_cols + est_cols
+        long_cols = {"前週L", "今週L"}
+        short_cols = {"前週S", "今週S"}
+
+    # -- Color palette for L/S --
+    _LONG_BG = "#dceefb"   # soft blue for Long
+    _SHORT_BG = "#fde8e8"  # soft red for Short
 
     # Color functions — only apply to participant rows (skip OI header rows)
     def _color_signed(val):
@@ -209,12 +211,10 @@ def _apply_table_styling(
     def _style_oi_header(row_idx, val, col):
         """Style for OI header rows."""
         if row_idx == 0:
-            # 建玉残高 row — highlight with blue-ish background
             if col in day_cols and pd.notna(val):
                 return "background-color: #dae8fc; color: #1a3c5e; font-weight: bold"
             return "background-color: #dae8fc; color: #1a3c5e"
         elif row_idx == 1:
-            # 前日比 row — signed coloring
             if col in day_cols:
                 return _color_signed(val)
             return ""
@@ -226,17 +226,34 @@ def _apply_table_styling(
     if oi_header_rows > 0:
         def _apply_oi_style(s):
             styles = [""] * len(s)
-            row_idx = s.name  # DataFrame index
+            row_idx = s.name
             if row_idx < oi_header_rows:
                 for i, (col, val) in enumerate(s.items()):
                     styles[i] = _style_oi_header(row_idx, val, col)
             return styles
         styled = styled.apply(_apply_oi_style, axis=1)
 
-    # Apply sign-based coloring to net/change columns (participant rows only)
-    if net_cols:
+    # Apply L/S background color to participant rows
+    if long_cols or short_cols:
         participant_idx = list(range(oi_header_rows, len(df)))
-        for col in net_cols:
+        if participant_idx:
+            for col in long_cols:
+                if col in df.columns:
+                    styled = styled.map(
+                        lambda v: f"background-color: {_LONG_BG}" if pd.notna(v) and v != "" else "",
+                        subset=(participant_idx, [col]),
+                    )
+            for col in short_cols:
+                if col in df.columns:
+                    styled = styled.map(
+                        lambda v: f"background-color: {_SHORT_BG}" if pd.notna(v) and v != "" else "",
+                        subset=(participant_idx, [col]),
+                    )
+
+    # Apply sign-based coloring to signed columns (participant rows only)
+    if signed_cols:
+        participant_idx = list(range(oi_header_rows, len(df)))
+        for col in signed_cols:
             if col in df.columns and participant_idx:
                 styled = styled.map(
                     _color_signed,
@@ -259,7 +276,7 @@ def _apply_table_styling(
     for col in df.columns:
         if col == "参加者" or col == "方向":
             continue
-        if col in net_cols:
+        if col in signed_cols:
             styled = styled.format(fmt_signed, subset=[col])
         elif col in int_cols:
             styled = styled.format(fmt_int, subset=[col])

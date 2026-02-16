@@ -60,8 +60,14 @@ def render_option_strike_table(
     all_put = put_cols_set | put_static
     all_call = call_cols_set | call_static
 
+    # Identify per-broker volume columns (participant breakdown) for border highlight
+    broker_vol_cols = set()
+    for td in week.trading_days:
+        broker_vol_cols.add(_day_col(td, "P"))
+        broker_vol_cols.add(_day_col(td, "C"))
+
     # Apply Pandas Styler
-    styled = _apply_styling(df, all_put, all_call, display_cols)
+    styled = _apply_styling(df, all_put, all_call, display_cols, broker_vol_cols)
 
     # Layout: table (left) | detail (right)
     left_col, right_col = st.columns([3, 1])
@@ -219,8 +225,19 @@ def _apply_styling(
     put_cols: set[str],
     call_cols: set[str],
     display_cols: list[str],
+    broker_vol_cols: set[str] | None = None,
 ) -> pd.io.formats.style.Styler:
-    """Apply Pandas Styler for PUT/CALL color coding and zebra stripes."""
+    """Apply Pandas Styler for PUT/CALL color coding, zebra stripes, and broker vol emphasis."""
+
+    _broker_cols = broker_vol_cols or set()
+
+    # Distinct darker background for broker volume columns to separate them visually
+    _PUT_BROKER = "#F5C8C8"       # stronger pink for PUT broker vol
+    _PUT_BROKER_ALT = "#EDC0C0"   # zebra alt
+    _CALL_BROKER = "#B8D4F0"      # stronger blue for CALL broker vol
+    _CALL_BROKER_ALT = "#A8CCE8"  # zebra alt
+    _SUMMARY_PUT_BROKER = "#E8A8A8"
+    _SUMMARY_CALL_BROKER = "#90B8E0"
 
     styler = df.style
 
@@ -241,15 +258,21 @@ def _apply_styling(
                 styles.append(f"background-color: {bg}; font-weight: bold")
                 continue
 
+            is_broker = col in _broker_cols
+
             if col in put_cols:
                 if is_summary:
-                    bg = _SUMMARY_PUT
+                    bg = _SUMMARY_PUT_BROKER if is_broker else _SUMMARY_PUT
+                elif is_broker:
+                    bg = _PUT_BROKER_ALT if is_odd_data else _PUT_BROKER
                 else:
                     bg = _PUT_BG_ALT if is_odd_data else _PUT_BG
                 styles.append(f"background-color: {bg}")
             elif col in call_cols:
                 if is_summary:
-                    bg = _SUMMARY_CALL
+                    bg = _SUMMARY_CALL_BROKER if is_broker else _SUMMARY_CALL
+                elif is_broker:
+                    bg = _CALL_BROKER_ALT if is_odd_data else _CALL_BROKER
                 else:
                     bg = _CALL_BG_ALT if is_odd_data else _CALL_BG
                 styles.append(f"background-color: {bg}")
