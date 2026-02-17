@@ -646,7 +646,7 @@ def _load_daily_oi_for_date(
     else:
         content = fetcher.download_daily_oi_excel(trade_date)
         if content is None:
-            _daily_oi_parse_cache[cache_key] = []
+            # Do NOT cache empty results — data may arrive later via R2/JPX
             return []
         records = parse_daily_oi_excel(content)
         _daily_oi_parse_cache[cache_key] = records
@@ -680,7 +680,7 @@ def load_daily_futures_oi(
         else:
             content = fetcher.download_daily_oi_excel(td)
             if content is None:
-                _daily_futures_oi_cache[cache_key] = []
+                # Do NOT cache empty results — data may arrive later via R2/JPX
                 continue
             records = parse_daily_futures_oi_excel(content)
             _daily_futures_oi_cache[cache_key] = records
