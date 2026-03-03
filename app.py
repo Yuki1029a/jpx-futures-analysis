@@ -15,6 +15,8 @@ from ui.weekly_table import render_weekly_table
 from ui.charts import render_net_change_bar_chart, render_daily_volume_stacked
 from ui.option_strike_table import render_option_strike_table
 from ui.gex_chart import render_gex_section
+from ui.option_pain_chart import render_option_pain_section
+from ui.report_export import build_report_bytes
 
 st.set_page_config(
     page_title="先物手口分析",
@@ -69,14 +71,29 @@ def main():
     st.sidebar.caption(f"v{_APP_VERSION}")
     selections = render_sidebar()
 
+    # Report download button
+    st.sidebar.markdown("---")
+    if st.sidebar.button("Word レポート生成"):
+        with st.sidebar:
+            with st.spinner("レポート生成中..."):
+                docx_bytes, filename = build_report_bytes()
+            st.download_button(
+                label="ダウンロード",
+                data=docx_bytes,
+                file_name=filename,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+
     product = selections["product"]
     week = selections["week"]
     contract_month = selections["contract_month"]
     opt_cm = selections["option_contract_month"]
     opt_pids = selections["option_participant_ids"]
 
-    # Top-level tabs: Futures, Options, GEX
-    main_tab1, main_tab2, main_tab3 = st.tabs(["先物分析", "オプション分析", "GEX分析"])
+    # Top-level tabs: Futures, Options, GEX, Option Pain
+    main_tab1, main_tab2, main_tab3, main_tab4 = st.tabs(
+        ["先物分析", "オプション分析", "GEX分析", "オプションペイン"]
+    )
 
     with main_tab1:
         _render_futures_section(product, week, contract_month)
@@ -86,6 +103,9 @@ def main():
 
     with main_tab3:
         _render_gex_section(week, opt_cm, opt_pids)
+
+    with main_tab4:
+        _render_option_pain_tab(week, opt_pids)
 
 
 def _render_futures_section(product, week, contract_month):
@@ -172,6 +192,29 @@ def _render_gex_section(week, opt_cm, opt_pids):
         return
 
     render_gex_section(opt_rows, week, opt_cm)
+
+
+def _render_option_pain_tab(week, opt_pids):
+    """Render option pain charts for all available contract months."""
+    from data.aggregator import get_available_option_contract_months
+
+    opt_months = get_available_option_contract_months(week)
+    if not opt_months:
+        st.info("オプション限月データなし")
+        return
+
+    # Load option data for each contract month
+    all_month_rows = {}
+    with st.spinner("オプションペインデータ読み込み中..."):
+        for cm in opt_months:
+            rows = _get_or_load_options(
+                week, cm, "全セッション合計",
+                SESSION_MODES["全セッション合計"], opt_pids,
+            )
+            if rows:
+                all_month_rows[cm] = rows
+
+    render_option_pain_section(all_month_rows, week)
 
 
 if __name__ == "__main__":

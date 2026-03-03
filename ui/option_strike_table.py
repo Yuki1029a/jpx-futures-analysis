@@ -343,6 +343,8 @@ def _build_summary_rows(rows, week):
 
     put_total = 0.0
     call_total = 0.0
+    put_jpx_total = 0.0
+    call_jpx_total = 0.0
 
     for td in week.trading_days:
         p_vol = sum(r.put_daily_volumes.get(td, 0) for r in rows)
@@ -366,9 +368,12 @@ def _build_summary_rows(rows, week):
 
         put_total += p_vol
         call_total += c_vol
+        put_jpx_total += p_jpx
+        call_jpx_total += c_jpx
 
-    rec["P計"] = put_total or None
-    rec["C計"] = call_total or None
+    # Use JPX volumes when participant volumes are incomplete (e.g. forward months)
+    rec["P計"] = max(put_total, put_jpx_total) or None
+    rec["C計"] = max(call_total, call_jpx_total) or None
 
     return [rec]
 
@@ -496,10 +501,23 @@ def _render_option_summary(rows: list[OptionStrikeRow]) -> None:
     st.markdown("---")
     cols = st.columns(4)
 
-    total_put_vol = sum(r.put_week_total or 0 for r in rows)
-    total_call_vol = sum(r.call_week_total or 0 for r in rows)
-    active_strikes = sum(1 for r in rows
-                         if (r.put_week_total or 0) > 0 or (r.call_week_total or 0) > 0)
+    # Use JPX volumes (from daily OI balance) as primary source;
+    # fallback to participant volumes when JPX data unavailable
+    total_put_vol = 0
+    total_call_vol = 0
+    active_strikes = 0
+    for r in rows:
+        p_jpx = sum(r.put_daily_jpx_volume.values())
+        c_jpx = sum(r.call_daily_jpx_volume.values())
+        p_part = r.put_week_total or 0
+        c_part = r.call_week_total or 0
+        p_vol = max(p_jpx, p_part)
+        c_vol = max(c_jpx, c_part)
+        total_put_vol += p_vol
+        total_call_vol += c_vol
+        if p_vol > 0 or c_vol > 0:
+            active_strikes += 1
+
     pcr = total_put_vol / total_call_vol if total_call_vol > 0 else 0
 
     with cols[0]:
