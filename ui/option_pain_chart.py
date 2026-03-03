@@ -3,7 +3,7 @@
 Computes the settlement price that minimizes total option payout.
 Includes:
 - Max Pain time series vs NK225
-- OI change heatmap showing which strikes drive Max Pain movement
+- Full-range OI distribution profile with Max Pain overlay
 - Per-month pain profile charts
 """
 from __future__ import annotations
@@ -36,8 +36,8 @@ def render_option_pain_section(
 
     st.markdown("---")
 
-    # 2. OI change heatmap + Max Pain driver analysis
-    _render_pain_driver_section(all_month_rows, week)
+    # 2. OI distribution profile + Max Pain driver
+    _render_oi_profile_section(sorted(all_month_rows.keys()))
 
     st.markdown("---")
 
@@ -237,275 +237,355 @@ def _render_maxpain_timeseries() -> None:
 
 
 # =====================================================================
-# OI Change Heatmap + Max Pain Driver Analysis
+# OI Distribution Profile + Max Pain Driver
 # =====================================================================
 
-def _render_pain_driver_section(
-    all_month_rows: dict[str, list[OptionStrikeRow]],
-    week: WeekDefinition,
-) -> None:
-    """Render OI change heatmap showing which strikes drive Max Pain."""
-    st.subheader("Max Pain 変動要因 (OI変動ヒートマップ)")
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_oi_snapshots(
+    contract_month: str, n_days: int = 5,
+) -> tuple[
+    list[date],
+    list[dict[int, int]],   # put_oi per day
+    list[dict[int, int]],   # call_oi per day
+    list[int | None],       # max_pain per day
+]:
+    """Load daily OI snapshots for last n_days trading dates (cached)."""
+    from data import fetcher
+    from data.aggregator import _load_daily_oi_for_date
 
-    sorted_cms = sorted(all_month_rows.keys())
-    if not sorted_cms:
+    # Get recent trading dates
+    months = fetcher.get_available_volume_months()
+    all_dates: list[date] = []
+    for m in months[:4]:
+        try:
+            entries = fetcher.get_volume_index(m)
+        except Exception:
+            continue
+        for entry in entries:
+            d = datetime.strptime(entry["TradeDate"], "%Y%m%d").date()
+            all_dates.append(d)
+    all_dates = sorted(set(all_dates))
+
+    # Find dates with actual OI data
+    valid_dates = []
+    put_oi_list = []
+    call_oi_list = []
+    mp_list = []
+
+    for td in reversed(all_dates):
+        if len(valid_dates) >= n_days:
+            break
+        try:
+            records = _load_daily_oi_for_date(td, contract_month)
+        except Exception:
+            continue
+        if not records:
+            continue
+
+        put_oi: dict[int, int] = {}
+        call_oi: dict[int, int] = {}
+        sm: dict[int, dict[str, int]] = defaultdict(lambda: {"CALL": 0, "PUT": 0})
+
+        for r in records:
+            if r.current_oi > 0:
+                if r.option_type == "PUT":
+                    put_oi[r.strike_price] = r.current_oi
+                else:
+                    call_oi[r.strike_price] = r.current_oi
+                sm[r.strike_price][r.option_type] += r.current_oi
+
+        if not sm:
+            continue
+
+        valid_dates.append(td)
+        put_oi_list.append(put_oi)
+        call_oi_list.append(call_oi)
+        mp_list.append(_calc_max_pain(sm))
+
+    # Reverse to chronological order
+    valid_dates.reverse()
+    put_oi_list.reverse()
+    call_oi_list.reverse()
+    mp_list.reverse()
+
+    return valid_dates, put_oi_list, call_oi_list, mp_list
+
+
+def _render_oi_profile_section(available_cms: list[str]) -> None:
+    """Render OI change heatmap and distribution with Max Pain."""
+    st.subheader("建玉変動 vs Max Pain")
+
+    if not available_cms:
         return
 
     selected_cm = st.selectbox(
-        "限月選択", sorted_cms,
+        "限月選択", available_cms,
         format_func=_format_cm,
-        key="pain_driver_cm",
+        key="oi_profile_cm",
     )
 
-    rows = all_month_rows.get(selected_cm, [])
-    if not rows:
-        st.info("データなし")
+    with st.spinner("建玉データ読み込み中..."):
+        dates, put_oi_list, call_oi_list, mp_list = _load_oi_snapshots(
+            selected_cm, n_days=5,
+        )
+
+    if len(dates) < 2:
+        st.info("データ不足（2日以上必要）")
         return
 
-    # Collect dates with OI data
-    all_dates: set[date] = set()
-    for r in rows:
-        all_dates.update(r.put_daily_oi.keys())
-        all_dates.update(r.call_daily_oi.keys())
+    # Collect all strikes across all days
+    all_strikes: set[int] = set()
+    for po, co in zip(put_oi_list, call_oi_list):
+        all_strikes.update(po.keys())
+        all_strikes.update(co.keys())
+    strikes = sorted(all_strikes)
 
-    if not all_dates:
-        st.info("建玉データなし")
-        return
-
-    sorted_dates = sorted(all_dates)[-5:]
-    if len(sorted_dates) < 2:
-        st.info("日数不足（2日以上必要）")
-        return
-
-    # Build strike lookup
-    strike_lookup: dict[int, OptionStrikeRow] = {r.strike_price: r for r in rows}
-
-    # Determine strike range: filter to strikes with meaningful OI
-    active_strikes: set[int] = set()
-    for r in rows:
-        for td in sorted_dates:
-            total = r.put_daily_oi.get(td, 0) + r.call_daily_oi.get(td, 0)
-            if total >= 100:  # filter noise
-                active_strikes.add(r.strike_price)
-
-    if len(active_strikes) < 3:
+    if len(strikes) < 3:
         st.info("有効行使価格が不足")
         return
 
-    # Filter to +/- 6000 from OI-weighted center
-    latest = sorted_dates[-1]
-    oi_weights = {
-        s: (strike_lookup[s].put_daily_oi.get(latest, 0) +
-            strike_lookup[s].call_daily_oi.get(latest, 0))
-        for s in active_strikes
-    }
-    total_w = sum(oi_weights.values())
-    center = (sum(s * w for s, w in oi_weights.items()) / total_w
-              if total_w > 0 else sorted(active_strikes)[len(active_strikes) // 2])
-
-    filtered_strikes = sorted(s for s in active_strikes if abs(s - center) <= 6000)
-    if len(filtered_strikes) < 3:
-        filtered_strikes = sorted(active_strikes)
-
-    # Use 500-yen-step standard strikes only for cleaner heatmap
-    standard_strikes = [s for s in filtered_strikes if s % 500 == 0]
-    if len(standard_strikes) >= 5:
-        filtered_strikes = standard_strikes
-
-    date_labels = [_date_label(td) for td in sorted_dates]
-
-    # Build OI change matrices (Y=strikes ascending, X=dates)
-    put_chg = []
-    call_chg = []
-    for strike in filtered_strikes:
-        r = strike_lookup.get(strike)
-        p_row = []
-        c_row = []
-        for td in sorted_dates:
-            p_row.append(r.put_daily_oi_change.get(td, 0) if r else 0)
-            c_row.append(r.call_daily_oi_change.get(td, 0) if r else 0)
-        put_chg.append(p_row)
-        call_chg.append(c_row)
-
-    put_chg_arr = np.array(put_chg)
-    call_chg_arr = np.array(call_chg)
-
-    # Compute Max Pain per day
-    max_pain_per_day = []
-    for td in sorted_dates:
-        sm: dict[int, dict[str, int]] = defaultdict(lambda: {"CALL": 0, "PUT": 0})
-        for r in rows:
-            p = r.put_daily_oi.get(td, 0)
-            c = r.call_daily_oi.get(td, 0)
-            if p > 0:
-                sm[r.strike_price]["PUT"] = p
-            if c > 0:
-                sm[r.strike_price]["CALL"] = c
-        mp = _calc_max_pain(sm)
-        max_pain_per_day.append(mp)
-
-    # Symmetric color range
-    abs_max = max(
-        np.abs(put_chg_arr).max() if put_chg_arr.size else 0,
-        np.abs(call_chg_arr).max() if call_chg_arr.size else 0,
-        1,
+    # --- Primary: OI change heatmap ---
+    _render_oi_change_heatmap(
+        dates, strikes, put_oi_list, call_oi_list, mp_list, selected_cm,
     )
 
-    strike_labels = [f"{s:,}" for s in filtered_strikes]
+    # --- Max Pain summary metrics ---
+    cols = st.columns(len(dates))
+    for i, (td, mp) in enumerate(zip(dates, mp_list)):
+        with cols[i]:
+            prev_mp = mp_list[i - 1] if i > 0 else None
+            delta = None
+            if prev_mp and mp:
+                diff = mp - prev_mp
+                if diff != 0:
+                    delta = f"{diff:+,}"
+            st.metric(
+                _date_label(td),
+                f"{mp:,}" if mp else "N/A",
+                delta=delta,
+            )
 
-    # Build figure: PUT heatmap (left) | CALL heatmap (right)
-    fig = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=["PUT OI 日次変動", "CALL OI 日次変動"],
-        shared_yaxes=True,
-        horizontal_spacing=0.08,
-    )
+    # --- Secondary: OI distribution overlay (collapsible) ---
+    with st.expander("建玉分布オーバーレイ (全行使価格)"):
+        _render_oi_distribution_chart(
+            dates, strikes, put_oi_list, call_oi_list, mp_list, selected_cm,
+        )
 
-    # PUT heatmap
-    fig.add_trace(go.Heatmap(
-        x=date_labels,
-        y=strike_labels,
-        z=put_chg_arr.tolist(),
-        colorscale="RdBu_r",  # red=negative(unwind), blue=positive(build)
-        zmid=0,
-        zmin=-abs_max,
-        zmax=abs_max,
-        colorbar=dict(title="枚数", x=0.46, len=0.8),
-        hovertemplate="行使価格: %{y}<br>日付: %{x}<br>PUT OI変動: %{z:+,}<extra></extra>",
-    ), row=1, col=1)
 
-    # CALL heatmap
-    fig.add_trace(go.Heatmap(
-        x=date_labels,
-        y=strike_labels,
-        z=call_chg_arr.tolist(),
-        colorscale="RdBu_r",
-        zmid=0,
-        zmin=-abs_max,
-        zmax=abs_max,
-        colorbar=dict(title="枚数", x=1.02, len=0.8),
-        hovertemplate="行使価格: %{y}<br>日付: %{x}<br>CALL OI変動: %{z:+,}<extra></extra>",
-    ), row=1, col=2)
+def _render_oi_distribution_chart(
+    dates: list[date],
+    strikes: list[int],
+    put_oi_list: list[dict[int, int]],
+    call_oi_list: list[dict[int, int]],
+    mp_list: list[int | None],
+    contract_month: str,
+) -> None:
+    """OI distribution: PUT as negative bars, CALL as positive, overlaid per day."""
+    fig = go.Figure()
 
-    # Max Pain overlay on both panels
-    mp_labels = [f"{mp:,}" if mp else "" for mp in max_pain_per_day]
-    for col_idx in [1, 2]:
-        fig.add_trace(go.Scatter(
-            x=date_labels,
-            y=[f"{mp:,}" if mp else None for mp in max_pain_per_day],
-            mode="lines+markers+text",
-            marker=dict(size=10, color="lime", symbol="diamond",
-                        line=dict(color="black", width=1.5)),
-            line=dict(color="lime", width=2),
-            text=mp_labels,
-            textposition="middle right",
-            textfont=dict(size=10, color="green"),
-            name="Max Pain" if col_idx == 1 else None,
-            showlegend=(col_idx == 1),
-            hovertemplate="Max Pain: %{y}<extra></extra>",
-        ), row=1, col=col_idx)
+    n = len(dates)
+    # Color gradient: oldest=light, newest=dark
+    put_alphas = [0.15 + 0.85 * i / max(n - 1, 1) for i in range(n)]
+    call_alphas = [0.15 + 0.85 * i / max(n - 1, 1) for i in range(n)]
+
+    for i, (td, po, co) in enumerate(zip(dates, put_oi_list, call_oi_list)):
+        label = _date_label(td)
+        pa = put_alphas[i]
+        ca = call_alphas[i]
+        is_latest = (i == n - 1)
+
+        # PUT OI (negative side)
+        put_vals = [-po.get(s, 0) for s in strikes]
+        fig.add_trace(go.Bar(
+            x=strikes, y=put_vals,
+            name=f"PUT {label}",
+            marker_color=f"rgba(220, 60, 60, {pa})",
+            width=200,
+            showlegend=is_latest,
+            legendgroup="PUT",
+            hovertemplate=f"PUT {label}<br>行使価格: %{{x:,}}<br>OI: %{{customdata:,}}<extra></extra>",
+            customdata=[po.get(s, 0) for s in strikes],
+        ))
+
+        # CALL OI (positive side)
+        call_vals = [co.get(s, 0) for s in strikes]
+        fig.add_trace(go.Bar(
+            x=strikes, y=call_vals,
+            name=f"CALL {label}",
+            marker_color=f"rgba(60, 120, 220, {ca})",
+            width=200,
+            showlegend=is_latest,
+            legendgroup="CALL",
+            hovertemplate=f"CALL {label}<br>行使価格: %{{x:,}}<br>OI: %{{y:,}}<extra></extra>",
+        ))
+
+    # Max Pain vertical lines
+    mp_colors = [f"rgba(0, 180, 0, {0.3 + 0.7 * i / max(n - 1, 1)})" for i in range(n)]
+    for i, (td, mp) in enumerate(zip(dates, mp_list)):
+        if mp is None:
+            continue
+        is_latest = (i == n - 1)
+        fig.add_vline(
+            x=mp,
+            line_dash="dash" if not is_latest else "solid",
+            line_color=mp_colors[i],
+            line_width=2 if is_latest else 1,
+            annotation_text=f"MP {_date_label(td)}" if is_latest else None,
+            annotation_position="top",
+            annotation_font_color="green",
+        )
 
     fig.update_layout(
-        title=f"OI変動 vs Max Pain推移 - {_format_cm(selected_cm)}",
-        height=max(len(filtered_strikes) * 22 + 120, 450),
-        margin=dict(l=0, r=0, t=60, b=0),
+        title=f"建玉分布 (全行使価格) - {_format_cm(contract_month)}",
+        xaxis=dict(title="行使価格", tickformat=","),
+        yaxis=dict(title="建玉枚数 (上=CALL / 下=PUT)"),
+        barmode="overlay",
         template="plotly_white",
+        height=500,
+        margin=dict(l=0, r=0, t=40, b=0),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+        ),
     )
-    fig.update_yaxes(autorange="reversed", row=1, col=1)
-    fig.update_yaxes(autorange="reversed", row=1, col=2)
 
     st.plotly_chart(fig, use_container_width=True)
-
     st.caption(
-        "青=OI増加（新規建て）/ 赤=OI減少（解消）/ "
-        "緑◆=Max Pain / ヒートマップはPUT・CALL別の日次OI変動量"
-    )
-
-    # Top OI changes driving Max Pain shifts
-    _render_pain_driver_table(
-        rows, filtered_strikes, sorted_dates, max_pain_per_day,
+        "濃い色=直近 / 薄い色=過去 / 緑縦線=Max Pain位置 / "
+        "上半分=CALL建玉 / 下半分=PUT建玉（反転表示）"
     )
 
 
-def _render_pain_driver_table(
-    rows: list[OptionStrikeRow],
-    strikes: list[int],
+def _render_oi_change_heatmap(
     dates: list[date],
-    max_pain_per_day: list[int | None],
+    strikes: list[int],
+    put_oi_list: list[dict[int, int]],
+    call_oi_list: list[dict[int, int]],
+    mp_list: list[int | None],
+    contract_month: str,
 ) -> None:
-    """Show table of top OI changes that likely drove Max Pain shifts."""
-    strike_lookup = {r.strike_price: r for r in rows}
+    """Heatmap of OI changes: X=strike, Y=date transition, color=OI change."""
+    if len(dates) < 2:
+        return
 
-    for i in range(1, len(dates)):
-        prev_mp = max_pain_per_day[i - 1]
-        curr_mp = max_pain_per_day[i]
-        if prev_mp is None or curr_mp is None:
-            continue
+    n_trans = len(dates) - 1
+    n_strikes = len(strikes)
 
-        mp_change = curr_mp - prev_mp
-        if mp_change == 0:
-            continue
+    # Build change matrices [n_trans x n_strikes]
+    put_chg = np.zeros((n_trans, n_strikes))
+    call_chg = np.zeros((n_trans, n_strikes))
 
-        td = dates[i]
-        direction = "上昇" if mp_change > 0 else "下落"
-
-        # Collect OI changes for this day
-        changes = []
-        for s in strikes:
-            r = strike_lookup.get(s)
-            if not r:
-                continue
-            p_chg = r.put_daily_oi_change.get(td, 0)
-            c_chg = r.call_daily_oi_change.get(td, 0)
-            if abs(p_chg) >= 50 or abs(c_chg) >= 50:
-                changes.append((s, p_chg, c_chg))
-
-        if not changes:
-            continue
-
-        # Sort by absolute total change
-        changes.sort(key=lambda x: abs(x[1]) + abs(x[2]), reverse=True)
-
-        with st.expander(
-            f"{_date_label(td)}: Max Pain {prev_mp:,} → {curr_mp:,} "
-            f"({mp_change:+,} {direction})",
-            expanded=(i == len(dates) - 1),  # latest day expanded
-        ):
-            rows_display = []
-            for s, p_chg, c_chg in changes[:8]:
-                impact = ""
-                # PUT OI increase below MP → pulls MP down
-                # PUT OI increase above MP → pulls MP up
-                # CALL OI increase above MP → pulls MP down
-                # CALL OI increase below MP → pulls MP up
-                if p_chg > 0 and s < curr_mp:
-                    impact = "MP引下げ"
-                elif p_chg > 0 and s > curr_mp:
-                    impact = "MP引上げ"
-                elif p_chg < 0 and s < curr_mp:
-                    impact = "MP引上げ"
-                elif c_chg > 0 and s > curr_mp:
-                    impact = "MP引下げ"
-                elif c_chg > 0 and s < curr_mp:
-                    impact = "MP引上げ"
-                elif c_chg < 0 and s > curr_mp:
-                    impact = "MP引上げ"
-                elif c_chg < 0 and s < curr_mp:
-                    impact = "MP引下げ"
-
-                rows_display.append({
-                    "行使価格": f"{s:,}",
-                    "PUT OI変動": f"{p_chg:+,}" if p_chg else "-",
-                    "CALL OI変動": f"{c_chg:+,}" if c_chg else "-",
-                    "影響方向": impact,
-                })
-
-            import pandas as pd
-            st.dataframe(
-                pd.DataFrame(rows_display),
-                use_container_width=True,
-                hide_index=True,
+    for t in range(n_trans):
+        for s_idx, s in enumerate(strikes):
+            put_chg[t, s_idx] = (
+                put_oi_list[t + 1].get(s, 0) - put_oi_list[t].get(s, 0)
             )
+            call_chg[t, s_idx] = (
+                call_oi_list[t + 1].get(s, 0) - call_oi_list[t].get(s, 0)
+            )
+
+    # Y-axis labels with Max Pain info
+    y_labels = []
+    for i in range(n_trans):
+        lbl = f"{_date_label(dates[i])}→{_date_label(dates[i+1])}"
+        if mp_list[i] and mp_list[i + 1]:
+            diff = mp_list[i + 1] - mp_list[i]
+            lbl += f"  MP:{mp_list[i+1]:,}({diff:+,})"
+        y_labels.append(lbl)
+
+    # Symmetric color range
+    max_abs = float(max(
+        np.abs(put_chg).max() if put_chg.size else 1,
+        np.abs(call_chg).max() if call_chg.size else 1,
+        1,
+    ))
+
+    # Custom hover text
+    put_hover = []
+    for t in range(n_trans):
+        row = []
+        for s_idx, s in enumerate(strikes):
+            val = int(put_chg[t, s_idx])
+            row.append(
+                f"行使価格: {s:,}<br>{y_labels[t]}<br>PUT OI変動: {val:+,}"
+            )
+        put_hover.append(row)
+
+    call_hover = []
+    for t in range(n_trans):
+        row = []
+        for s_idx, s in enumerate(strikes):
+            val = int(call_chg[t, s_idx])
+            row.append(
+                f"行使価格: {s:,}<br>{y_labels[t]}<br>CALL OI変動: {val:+,}"
+            )
+        call_hover.append(row)
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        subplot_titles=["PUT OI 前日比", "CALL OI 前日比"],
+        vertical_spacing=0.15,
+        shared_xaxes=True,
+    )
+
+    fig.add_trace(go.Heatmap(
+        z=put_chg.tolist(),
+        x=strikes,
+        y=y_labels,
+        colorscale="RdBu",
+        zmid=0,
+        zmin=-max_abs,
+        zmax=max_abs,
+        text=put_hover,
+        hoverinfo="text",
+        colorbar=dict(title="枚数", len=0.4, y=0.8),
+    ), row=1, col=1)
+
+    fig.add_trace(go.Heatmap(
+        z=call_chg.tolist(),
+        x=strikes,
+        y=y_labels,
+        colorscale="RdBu",
+        zmid=0,
+        zmin=-max_abs,
+        zmax=max_abs,
+        text=call_hover,
+        hoverinfo="text",
+        colorbar=dict(title="枚数", len=0.4, y=0.2),
+    ), row=2, col=1)
+
+    # Max Pain markers (green diamonds at after-MP position per row)
+    for subplot_row in [1, 2]:
+        mp_x = [mp_list[t + 1] for t in range(n_trans) if mp_list[t + 1]]
+        mp_y = [y_labels[t] for t in range(n_trans) if mp_list[t + 1]]
+        fig.add_trace(go.Scatter(
+            x=mp_x,
+            y=mp_y,
+            mode="markers",
+            marker=dict(
+                symbol="diamond",
+                size=10,
+                color="lime",
+                line=dict(color="black", width=1),
+            ),
+            name="Max Pain",
+            showlegend=(subplot_row == 1),
+            legendgroup="mp",
+            hovertemplate="Max Pain: %{x:,}<extra></extra>",
+        ), row=subplot_row, col=1)
+
+    fig.update_layout(
+        title=f"OI 前日比ヒートマップ - {_format_cm(contract_month)}",
+        height=max(350, 120 * n_trans + 200),
+        template="plotly_white",
+        margin=dict(l=0, r=0, t=40, b=0),
+    )
+
+    fig.update_xaxes(tickformat=",", row=2, col=1)
+
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "青=OI増加 / 赤=OI減少 / 緑◆=Max Pain位置"
+    )
 
 
 # =====================================================================
