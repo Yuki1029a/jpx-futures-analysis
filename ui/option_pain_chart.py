@@ -2,37 +2,40 @@
 
 Computes the settlement price that minimizes total option payout
 (i.e., maximum pain for option holders / minimum payout for writers).
-Includes time-series view of Max Pain vs NK225 closing prices.
+Includes time-series view of Max Pain vs NK225 closing prices
+and 3D pain surface for selected contract month.
 """
 from __future__ import annotations
 
 import streamlit as st
-import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from datetime import date, datetime
 from collections import defaultdict
 
 from models import OptionStrikeRow, WeekDefinition, DailyOIBalance
 
+_DOW_JP = ["月", "火", "水", "木", "金", "土", "日"]
+
 
 def render_option_pain_section(
     all_month_rows: dict[str, list[OptionStrikeRow]],
     week: WeekDefinition,
 ) -> None:
-    """Render option pain charts for multiple contract months.
-
-    Args:
-        all_month_rows: {contract_month: [OptionStrikeRow, ...]}
-        week: Current week definition.
-    """
+    """Render option pain charts for multiple contract months."""
     st.subheader("オプションペイン分析")
 
     if not all_month_rows:
         st.info("オプションデータなし")
         return
 
-    # Time series chart first (all months combined)
+    # Time series chart (all months)
     _render_maxpain_timeseries()
+
+    st.markdown("---")
+
+    # 3D pain surface (selected month)
+    _render_pain_3d_section(all_month_rows, week)
 
     st.markdown("---")
 
@@ -61,18 +64,10 @@ def _load_maxpain_timeseries_data() -> tuple[
     list[date],
     list[float],
 ]:
-    """Load and compute max pain time series data (cached 10 min).
-
-    Returns:
-        maxpain_data: {date: {contract_month: max_pain_strike}}
-        contract_months: sorted list of months with sufficient data
-        nk_dates: NK225 price dates
-        nk_prices: NK225 closing prices
-    """
+    """Load and compute max pain time series data (cached 10 min)."""
     from data import fetcher
     from data.aggregator import _load_daily_oi_for_date
 
-    # Get recent trading dates
     months = fetcher.get_available_volume_months()
     all_dates: list[date] = []
     for m in months[:4]:
@@ -88,7 +83,6 @@ def _load_maxpain_timeseries_data() -> tuple[
     if not all_dates:
         return {}, [], [], []
 
-    # Compute max pain per date
     maxpain_data: dict[date, dict[str, int | None]] = {}
     all_cms: set[str] = set()
 
@@ -99,20 +93,17 @@ def _load_maxpain_timeseries_data() -> tuple[
             continue
         if not records:
             continue
-
         mp = _compute_max_pain(records)
         if mp:
             maxpain_data[td] = mp
             all_cms.update(mp.keys())
 
-    # Filter contract months: require >= 3 dates
     contract_months = []
     for cm in sorted(all_cms):
         count = sum(1 for d in maxpain_data if maxpain_data[d].get(cm) is not None)
         if count >= 3:
             contract_months.append(cm)
 
-    # Fetch NK225 prices
     nk_dates: list[date] = []
     nk_prices: list[float] = []
     try:
@@ -153,7 +144,6 @@ def _compute_max_pain(records: list[DailyOIBalance]) -> dict[str, int | None]:
 
         best_strike = None
         min_pain = float("inf")
-
         for S in strikes:
             pain = sum(max(0, S - K) * oi for K, oi in call_oi.items())
             pain += sum(max(0, K - S) * oi for K, oi in put_oi.items())
@@ -179,37 +169,24 @@ def _render_maxpain_timeseries() -> None:
 
     fig = go.Figure()
 
-    # NK225 closing prices
     if nk_dates:
         fig.add_trace(go.Scatter(
-            x=nk_dates,
-            y=nk_prices,
-            mode="lines",
-            name="NK225終値",
+            x=nk_dates, y=nk_prices,
+            mode="lines", name="NK225終値",
             line=dict(color="black", width=2.5),
         ))
 
-    # Max Pain lines per contract month
     colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
     sorted_dates = sorted(maxpain_data.keys())
 
     for i, cm in enumerate(contract_months):
-        cm_dates = []
-        cm_values = []
-        for d in sorted_dates:
-            mp = maxpain_data[d].get(cm)
-            if mp is not None:
-                cm_dates.append(d)
-                cm_values.append(mp)
-
-        label = f"MaxPain {_format_cm(cm)}"
+        cm_dates = [d for d in sorted_dates if maxpain_data[d].get(cm) is not None]
+        cm_values = [maxpain_data[d][cm] for d in cm_dates]
         color = colors[i % len(colors)]
-
         fig.add_trace(go.Scatter(
-            x=cm_dates,
-            y=cm_values,
+            x=cm_dates, y=cm_values,
             mode="lines+markers",
-            name=label,
+            name=f"MaxPain {_format_cm(cm)}",
             line=dict(color=color, width=1.5, dash="dot"),
             marker=dict(size=6, color=color),
         ))
@@ -230,7 +207,7 @@ def _render_maxpain_timeseries() -> None:
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # Summary table
+    # Summary metrics
     nk_lookup = dict(zip(nk_dates, nk_prices))
     latest_date = sorted_dates[-1] if sorted_dates else None
     if latest_date:
@@ -245,9 +222,187 @@ def _render_maxpain_timeseries() -> None:
                 if mp:
                     delta = None
                     if nk_close:
-                        diff = mp - nk_close
-                        delta = f"{diff:+,.0f}"
+                        delta = f"{mp - nk_close:+,.0f}"
                     st.metric(f"MaxPain {cm[:2]}/{cm[2:]}", f"{mp:,}", delta=delta)
+
+
+# =====================================================================
+# 3D Pain Surface (selected contract month, last 5 days)
+# =====================================================================
+
+def _render_pain_3d_section(
+    all_month_rows: dict[str, list[OptionStrikeRow]],
+    week: WeekDefinition,
+) -> None:
+    """Render 3D option pain surface for a selected contract month."""
+    st.subheader("ペインプロファイル 3D (直近5営業日)")
+
+    sorted_cms = sorted(all_month_rows.keys())
+    if not sorted_cms:
+        return
+
+    selected_cm = st.selectbox(
+        "限月選択",
+        sorted_cms,
+        format_func=_format_cm,
+        key="pain_3d_cm",
+    )
+
+    rows = all_month_rows.get(selected_cm, [])
+    if not rows:
+        st.info("データなし")
+        return
+
+    # Collect all dates with OI data
+    all_dates: set[date] = set()
+    for r in rows:
+        all_dates.update(r.put_daily_oi.keys())
+        all_dates.update(r.call_daily_oi.keys())
+
+    if not all_dates:
+        st.info("建玉データなし")
+        return
+
+    sorted_dates = sorted(all_dates)[-5:]  # last 5 days
+
+    # Collect strikes with meaningful OI on any of the dates
+    active_strikes: set[int] = set()
+    for r in rows:
+        for td in sorted_dates:
+            if r.put_daily_oi.get(td, 0) > 0 or r.call_daily_oi.get(td, 0) > 0:
+                active_strikes.add(r.strike_price)
+    strikes = sorted(active_strikes)
+
+    if len(strikes) < 3:
+        st.info("有効行使価格が不足")
+        return
+
+    # Filter strikes to a reasonable range around the pain center
+    # (too many strikes makes the 3D chart unreadable)
+    # Compute rough center from latest day
+    latest = sorted_dates[-1]
+    put_oi_latest = {r.strike_price: r.put_daily_oi.get(latest, 0) for r in rows}
+    call_oi_latest = {r.strike_price: r.call_daily_oi.get(latest, 0) for r in rows}
+    total_oi_by_strike = {
+        s: put_oi_latest.get(s, 0) + call_oi_latest.get(s, 0) for s in strikes
+    }
+    # Weighted center
+    total_w = sum(total_oi_by_strike.values())
+    if total_w > 0:
+        center = sum(s * oi for s, oi in total_oi_by_strike.items()) / total_w
+    else:
+        center = strikes[len(strikes) // 2]
+
+    # Keep strikes within +/- 8000 of center (covers meaningful range)
+    filtered_strikes = [s for s in strikes if abs(s - center) <= 8000]
+    if len(filtered_strikes) < 3:
+        filtered_strikes = strikes  # fallback
+
+    OKU = 1e8
+    MULT = 1000
+    scale = MULT / OKU
+
+    # Build pain matrix: rows=dates, cols=strikes
+    z_data = []
+    date_labels = []
+    max_pain_per_day = []
+
+    for td in sorted_dates:
+        put_oi = {}
+        call_oi = {}
+        for r in rows:
+            p = r.put_daily_oi.get(td, 0)
+            c = r.call_daily_oi.get(td, 0)
+            if p > 0:
+                put_oi[r.strike_price] = p
+            if c > 0:
+                call_oi[r.strike_price] = c
+
+        pain_row = []
+        min_pain = float("inf")
+        mp_strike = None
+        for S in filtered_strikes:
+            pain = sum(max(0, S - K) * oi for K, oi in call_oi.items())
+            pain += sum(max(0, K - S) * oi for K, oi in put_oi.items())
+            pain_scaled = pain * scale
+            pain_row.append(pain_scaled)
+            if pain < min_pain:
+                min_pain = pain
+                mp_strike = S
+
+        z_data.append(pain_row)
+        dow = _DOW_JP[td.weekday()]
+        date_labels.append(f"{td.strftime('%m/%d')}({dow})")
+        max_pain_per_day.append(mp_strike)
+
+    z_array = np.array(z_data)
+
+    # 3D surface chart
+    fig = go.Figure(data=[go.Surface(
+        x=filtered_strikes,
+        y=list(range(len(sorted_dates))),
+        z=z_array,
+        colorscale="YlOrRd",
+        colorbar=dict(title="払出額(億円)"),
+        hovertemplate=(
+            "行使価格: %{x:,}<br>"
+            "日付: %{customdata}<br>"
+            "払出額: %{z:,.0f}億円<extra></extra>"
+        ),
+        customdata=np.array([[dl] * len(filtered_strikes) for dl in date_labels]),
+    )])
+
+    # Add max pain markers
+    mp_x = max_pain_per_day
+    mp_y = list(range(len(sorted_dates)))
+    mp_z = [z_data[i][filtered_strikes.index(mp)] if mp in filtered_strikes else 0
+            for i, mp in enumerate(max_pain_per_day)]
+
+    fig.add_trace(go.Scatter3d(
+        x=mp_x, y=mp_y, z=mp_z,
+        mode="markers+text",
+        marker=dict(size=6, color="green", symbol="diamond"),
+        text=[f"MP:{s:,}" for s in max_pain_per_day],
+        textposition="top center",
+        textfont=dict(size=10, color="green"),
+        name="Max Pain",
+        hovertemplate="Max Pain: %{x:,}<br>%{text}<extra></extra>",
+    ))
+
+    fig.update_layout(
+        title=f"Option Pain 3D Surface - {_format_cm(selected_cm)}",
+        scene=dict(
+            xaxis=dict(title="行使価格", tickformat=","),
+            yaxis=dict(
+                title="日付",
+                tickvals=list(range(len(sorted_dates))),
+                ticktext=date_labels,
+            ),
+            zaxis=dict(title="払出額 (億円)", tickformat=","),
+            camera=dict(eye=dict(x=1.5, y=-1.8, z=0.8)),
+        ),
+        height=600,
+        margin=dict(l=0, r=0, t=40, b=0),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Max Pain per day summary
+    cols = st.columns(len(sorted_dates))
+    for i, (td, mp) in enumerate(zip(sorted_dates, max_pain_per_day)):
+        dow = _DOW_JP[td.weekday()]
+        with cols[i]:
+            prev_mp = max_pain_per_day[i - 1] if i > 0 else None
+            delta = None
+            if prev_mp and mp:
+                diff = mp - prev_mp
+                if diff != 0:
+                    delta = f"{diff:+,}"
+            st.metric(
+                f"{td.strftime('%m/%d')}({dow})",
+                f"{mp:,}" if mp else "N/A",
+                delta=delta,
+            )
 
 
 # =====================================================================
@@ -280,12 +435,10 @@ def _render_single_pain(
         return
 
     strikes.sort()
-
     total_oi = sum(put_oi.values()) + sum(call_oi.values())
     if total_oi == 0:
         return
 
-    # Calculate option pain
     settlement_prices = strikes
     call_pain = []
     put_pain = []
@@ -301,7 +454,6 @@ def _render_single_pain(
     max_pain_idx = total_pain.index(min(total_pain))
     max_pain_strike = settlement_prices[max_pain_idx]
 
-    # Scale to 億円
     OKU = 1e8
     MULT = 1000
     scale = MULT / OKU
@@ -317,14 +469,12 @@ def _render_single_pain(
         y=call_pain_oku,
         marker_color="rgba(74, 144, 217, 0.7)",
     ))
-
     fig.add_trace(go.Bar(
         name="PUT Payout",
         x=[f"{s:,}" for s in settlement_prices],
         y=put_pain_oku,
         marker_color="rgba(217, 74, 74, 0.7)",
     ))
-
     fig.add_trace(go.Scatter(
         name="Total",
         x=[f"{s:,}" for s in settlement_prices],
@@ -334,24 +484,17 @@ def _render_single_pain(
         marker=dict(size=3),
     ))
 
-    fig.add_vline(
-        x=max_pain_idx,
-        line_dash="dash",
-        line_color="green",
-        line_width=2,
-    )
+    fig.add_vline(x=max_pain_idx, line_dash="dash", line_color="green", line_width=2)
     fig.add_annotation(
         x=f"{max_pain_strike:,}",
         y=max(total_pain_oku) * 0.95,
         text=f"Max Pain: {max_pain_strike:,}",
-        showarrow=True,
-        arrowhead=2,
-        arrowcolor="green",
+        showarrow=True, arrowhead=2, arrowcolor="green",
         font=dict(color="green", size=12),
     )
 
-    dow_jp = ["月", "火", "水", "木", "金", "土", "日"]
-    date_str = f"{latest_date.strftime('%m/%d')}({dow_jp[latest_date.weekday()]})"
+    dow = _DOW_JP[latest_date.weekday()]
+    date_str = f"{latest_date.strftime('%m/%d')}({dow})"
 
     fig.update_layout(
         title=f"Option Pain - {_format_cm(contract_month)}  (建玉基準: {date_str})",
