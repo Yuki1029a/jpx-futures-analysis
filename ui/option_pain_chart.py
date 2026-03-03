@@ -647,27 +647,27 @@ def _render_single_pain(
     fig = go.Figure()
     fig.add_trace(go.Bar(
         name="CALL Payout",
-        x=[f"{s:,}" for s in settlement_prices],
+        x=settlement_prices,
         y=call_pain_oku,
         marker_color="rgba(74, 144, 217, 0.7)",
     ))
     fig.add_trace(go.Bar(
         name="PUT Payout",
-        x=[f"{s:,}" for s in settlement_prices],
+        x=settlement_prices,
         y=put_pain_oku,
         marker_color="rgba(217, 74, 74, 0.7)",
     ))
     fig.add_trace(go.Scatter(
         name="Total",
-        x=[f"{s:,}" for s in settlement_prices],
+        x=settlement_prices,
         y=total_pain_oku,
         mode="lines+markers",
         line=dict(color="black", width=2),
         marker=dict(size=3),
     ))
-    fig.add_vline(x=f"{max_pain_strike:,}", line_dash="dash", line_color="green", line_width=2)
+    fig.add_vline(x=max_pain_strike, line_dash="dash", line_color="green", line_width=2)
     fig.add_annotation(
-        x=f"{max_pain_strike:,}",
+        x=max_pain_strike,
         y=max(total_pain_oku) * 0.95,
         text=f"Max Pain: {max_pain_strike:,}",
         showarrow=True, arrowhead=2, arrowcolor="green",
@@ -679,7 +679,7 @@ def _render_single_pain(
 
     fig.update_layout(
         title=f"Option Pain - {_format_cm(contract_month)}  (建玉基準: {date_str})",
-        xaxis_title="SQ決済価格",
+        xaxis=dict(title="SQ決済価格", tickformat=","),
         yaxis_title="オプション払出額 (億円)",
         barmode="stack",
         height=420,
