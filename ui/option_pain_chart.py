@@ -665,7 +665,7 @@ def _render_single_pain(
         line=dict(color="black", width=2),
         marker=dict(size=3),
     ))
-    fig.add_vline(x=max_pain_idx, line_dash="dash", line_color="green", line_width=2)
+    fig.add_vline(x=f"{max_pain_strike:,}", line_dash="dash", line_color="green", line_width=2)
     fig.add_annotation(
         x=f"{max_pain_strike:,}",
         y=max(total_pain_oku) * 0.95,
