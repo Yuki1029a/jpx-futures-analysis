@@ -380,63 +380,107 @@ def _render_oi_distribution_chart(
     mp_list: list[int | None],
     contract_month: str,
 ) -> None:
-    """OI distribution: PUT as negative bars, CALL as positive, overlaid per day."""
+    """OI distribution: latest vs previous day, bars offset side-by-side."""
+    if len(dates) < 2:
+        return
+
     fig = go.Figure()
 
-    n = len(dates)
-    # Color gradient: oldest=light, newest=dark
-    put_alphas = [0.15 + 0.85 * i / max(n - 1, 1) for i in range(n)]
-    call_alphas = [0.15 + 0.85 * i / max(n - 1, 1) for i in range(n)]
+    # Use latest 2 days only
+    curr_idx = len(dates) - 1
+    prev_idx = len(dates) - 2
+    curr_label = _date_label(dates[curr_idx])
+    prev_label = _date_label(dates[prev_idx])
 
-    for i, (td, po, co) in enumerate(zip(dates, put_oi_list, call_oi_list)):
-        label = _date_label(td)
-        pa = put_alphas[i]
-        ca = call_alphas[i]
-        is_latest = (i == n - 1)
+    curr_po = put_oi_list[curr_idx]
+    prev_po = put_oi_list[prev_idx]
+    curr_co = call_oi_list[curr_idx]
+    prev_co = call_oi_list[prev_idx]
 
-        # PUT OI (negative side)
-        put_vals = [-po.get(s, 0) for s in strikes]
-        fig.add_trace(go.Bar(
-            x=strikes, y=put_vals,
-            name=f"PUT {label}",
-            marker_color=f"rgba(220, 60, 60, {pa})",
-            width=200,
-            showlegend=is_latest,
-            legendgroup="PUT",
-            hovertemplate=f"PUT {label}<br>行使価格: %{{x:,}}<br>OI: %{{customdata:,}}<extra></extra>",
-            customdata=[po.get(s, 0) for s in strikes],
-        ))
+    # Compute offset: ~40% of typical strike interval
+    intervals = [strikes[i + 1] - strikes[i] for i in range(min(20, len(strikes) - 1))]
+    offset = int(np.median(intervals) * 0.35) if intervals else 50
 
-        # CALL OI (positive side)
-        call_vals = [co.get(s, 0) for s in strikes]
-        fig.add_trace(go.Bar(
-            x=strikes, y=call_vals,
-            name=f"CALL {label}",
-            marker_color=f"rgba(60, 120, 220, {ca})",
-            width=200,
-            showlegend=is_latest,
-            legendgroup="CALL",
-            hovertemplate=f"CALL {label}<br>行使価格: %{{x:,}}<br>OI: %{{y:,}}<extra></extra>",
-        ))
+    # Previous day bars (lighter, offset left)
+    prev_x = [s - offset for s in strikes]
+    fig.add_trace(go.Bar(
+        x=prev_x,
+        y=[-prev_po.get(s, 0) for s in strikes],
+        name=f"PUT {prev_label}",
+        marker_color="rgba(220, 60, 60, 0.25)",
+        width=offset * 1.8,
+        legendgroup="prev_put",
+        hovertemplate=f"PUT {prev_label}<br>行使価格: %{{customdata:,}}<br>OI: %{{meta:,}}<extra></extra>",
+        customdata=strikes,
+        meta=[prev_po.get(s, 0) for s in strikes],
+    ))
+    fig.add_trace(go.Bar(
+        x=prev_x,
+        y=[prev_co.get(s, 0) for s in strikes],
+        name=f"CALL {prev_label}",
+        marker_color="rgba(60, 120, 220, 0.25)",
+        width=offset * 1.8,
+        legendgroup="prev_call",
+        hovertemplate=f"CALL {prev_label}<br>行使価格: %{{customdata:,}}<br>OI: %{{y:,}}<extra></extra>",
+        customdata=strikes,
+    ))
 
-    # Max Pain vertical lines
-    mp_colors = [f"rgba(0, 180, 0, {0.3 + 0.7 * i / max(n - 1, 1)})" for i in range(n)]
-    for i, (td, mp) in enumerate(zip(dates, mp_list)):
-        if mp is None:
-            continue
-        is_latest = (i == n - 1)
+    # Current day bars (darker, offset right)
+    curr_x = [s + offset for s in strikes]
+    fig.add_trace(go.Bar(
+        x=curr_x,
+        y=[-curr_po.get(s, 0) for s in strikes],
+        name=f"PUT {curr_label}",
+        marker_color="rgba(220, 60, 60, 0.8)",
+        width=offset * 1.8,
+        legendgroup="curr_put",
+        hovertemplate=f"PUT {curr_label}<br>行使価格: %{{customdata:,}}<br>OI: %{{meta:,}}<extra></extra>",
+        customdata=strikes,
+        meta=[curr_po.get(s, 0) for s in strikes],
+    ))
+    fig.add_trace(go.Bar(
+        x=curr_x,
+        y=[curr_co.get(s, 0) for s in strikes],
+        name=f"CALL {curr_label}",
+        marker_color="rgba(60, 120, 220, 0.8)",
+        width=offset * 1.8,
+        legendgroup="curr_call",
+        hovertemplate=f"CALL {curr_label}<br>行使価格: %{{customdata:,}}<br>OI: %{{y:,}}<extra></extra>",
+        customdata=strikes,
+    ))
+
+    # Max Pain lines: previous (bottom label) and current (top label)
+    mp_prev = mp_list[prev_idx]
+    mp_curr = mp_list[curr_idx]
+    if mp_prev is not None:
         fig.add_vline(
-            x=mp,
-            line_dash="dash" if not is_latest else "solid",
-            line_color=mp_colors[i],
-            line_width=2 if is_latest else 1,
-            annotation_text=f"MP {_date_label(td)}" if is_latest else None,
-            annotation_position="top",
-            annotation_font_color="green",
+            x=mp_prev, line_dash="dash",
+            line_color="rgba(0, 180, 0, 0.4)", line_width=1.5,
+        )
+        fig.add_annotation(
+            x=mp_prev, y=0, yref="y domain",
+            text=f"MP {prev_label}: {mp_prev:,}",
+            showarrow=False,
+            font=dict(color="rgba(0,150,0,0.7)", size=10),
+            bgcolor="rgba(255,255,255,0.8)",
+            yanchor="bottom",
+        )
+    if mp_curr is not None:
+        fig.add_vline(
+            x=mp_curr, line_dash="solid",
+            line_color="green", line_width=2,
+        )
+        fig.add_annotation(
+            x=mp_curr, y=1, yref="y domain",
+            text=f"MP {curr_label}: {mp_curr:,}",
+            showarrow=False,
+            font=dict(color="green", size=11, weight="bold"),
+            bgcolor="rgba(255,255,255,0.8)",
+            yanchor="top",
         )
 
     fig.update_layout(
-        title=f"建玉分布 (全行使価格) - {_format_cm(contract_month)}",
+        title=f"建玉分布 - {_format_cm(contract_month)}  ({prev_label} vs {curr_label})",
         xaxis=dict(title="行使価格", tickformat=","),
         yaxis=dict(title="建玉枚数 (上=CALL / 下=PUT)"),
         barmode="overlay",
@@ -450,8 +494,8 @@ def _render_oi_distribution_chart(
 
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
-        "濃い色=直近 / 薄い色=過去 / 緑縦線=Max Pain位置 / "
-        "上半分=CALL建玉 / 下半分=PUT建玉（反転表示）"
+        f"薄色={prev_label}(前日) / 濃色={curr_label}(当日) / "
+        "緑実線=当日MP / 緑破線=前日MP / 上=CALL / 下=PUT"
     )
 
 
@@ -463,15 +507,11 @@ def _render_oi_change_heatmap(
     mp_list: list[int | None],
     contract_month: str,
 ) -> None:
-    """Bar charts of OI changes per business day.
+    """Vertical subplots of daily OI changes, filtered to active strikes.
 
-    Each subplot shows one day's OI changes:
-    - X-axis: strike prices
-    - Y-axis: OI change (PUT upward / CALL downward)
-    - PUT OI change shown as red bars (positive = increase up, negative = decrease down)
-    - CALL OI change shown as blue bars inverted (increase shown downward as negative)
-    - Green vertical line at Max Pain position
-    Last 5 business days shown side by side.
+    Each row = one day transition (full chart width).
+    PUT changes shown as red bars (upward), CALL as blue (downward/inverted).
+    Only strikes with non-zero changes are displayed.
     """
     if len(dates) < 2:
         return
@@ -479,113 +519,120 @@ def _render_oi_change_heatmap(
     n_trans = len(dates) - 1
     n_strikes = len(strikes)
 
-    # Build change arrays per transition
-    put_chg = np.zeros((n_trans, n_strikes))
-    call_chg = np.zeros((n_trans, n_strikes))
-
+    # Build change dicts per transition
+    put_chg_dicts: list[dict[int, int]] = []
+    call_chg_dicts: list[dict[int, int]] = []
     for t in range(n_trans):
-        for s_idx, s in enumerate(strikes):
-            put_chg[t, s_idx] = (
-                put_oi_list[t + 1].get(s, 0) - put_oi_list[t].get(s, 0)
-            )
-            call_chg[t, s_idx] = (
-                call_oi_list[t + 1].get(s, 0) - call_oi_list[t].get(s, 0)
-            )
+        pc: dict[int, int] = {}
+        cc: dict[int, int] = {}
+        for s in strikes:
+            pv = put_oi_list[t + 1].get(s, 0) - put_oi_list[t].get(s, 0)
+            cv = call_oi_list[t + 1].get(s, 0) - call_oi_list[t].get(s, 0)
+            if pv != 0:
+                pc[s] = pv
+            if cv != 0:
+                cc[s] = cv
+        put_chg_dicts.append(pc)
+        call_chg_dicts.append(cc)
 
-    # Show last 5 transitions (most recent)
-    show_n = min(5, n_trans)
+    # Rank strikes by cumulative absolute change, show top N
+    _MAX_BARS = 40
+    cum_score: dict[int, int] = defaultdict(int)
+    for pc, cc in zip(put_chg_dicts, call_chg_dicts):
+        for s, v in pc.items():
+            cum_score[s] += abs(v)
+        for s, v in cc.items():
+            cum_score[s] += abs(v)
+    ranked = sorted(cum_score, key=cum_score.get, reverse=True)
+    active_strikes = sorted(ranked[:_MAX_BARS])
+
+    if not active_strikes:
+        st.info("建玉変動なし")
+        return
+
+    show_n = min(4, n_trans)
     start = n_trans - show_n
 
-    # Subplot titles with date + Max Pain info
     titles = []
     for t in range(start, n_trans):
-        lbl = f"{_date_label(dates[t+1])}"
+        lbl = f"{_date_label(dates[t])}→{_date_label(dates[t+1])}"
         if mp_list[t + 1]:
-            lbl += f" MP:{mp_list[t+1]:,}"
+            lbl += f"  MP:{mp_list[t+1]:,}"
             if mp_list[t]:
                 diff = mp_list[t + 1] - mp_list[t]
                 lbl += f"({diff:+,})"
         titles.append(lbl)
 
     fig = make_subplots(
-        rows=1, cols=show_n,
+        rows=show_n, cols=1,
         subplot_titles=titles,
-        shared_yaxes=True,
-        horizontal_spacing=0.03,
+        shared_xaxes=True,
+        vertical_spacing=0.08,
     )
 
-    for col_idx, t in enumerate(range(start, n_trans)):
-        col = col_idx + 1
-        show_legend = (col_idx == 0)
+    for row_idx, t in enumerate(range(start, n_trans)):
+        row = row_idx + 1
+        show_legend = (row_idx == 0)
+        pc = put_chg_dicts[t]
+        cc = call_chg_dicts[t]
 
-        # PUT OI change: display as-is (positive = increase upward, negative = decrease downward)
-        put_vals = put_chg[t]
-        # CALL OI change: inverted display (positive increase shown as negative/downward)
-        call_vals = -call_chg[t]
+        put_y = [pc.get(s, 0) for s in active_strikes]
+        call_y = [-cc.get(s, 0) for s in active_strikes]
+        call_raw = [cc.get(s, 0) for s in active_strikes]
 
-        # PUT bars (red) - upward display
+        # PUT bars (red, upward)
         fig.add_trace(go.Bar(
-            x=strikes,
-            y=put_vals.tolist(),
-            name="PUT OI変化",
+            x=active_strikes, y=put_y,
+            name="PUT",
             marker_color="rgba(220, 60, 60, 0.7)",
             showlegend=show_legend,
             legendgroup="put",
             hovertemplate="行使価格: %{x:,}<br>PUT OI変化: %{y:+,}<extra></extra>",
-        ), row=1, col=col)
+        ), row=row, col=1)
 
-        # CALL bars (blue) - downward/inverted display
+        # CALL bars (blue, inverted downward)
         fig.add_trace(go.Bar(
-            x=strikes,
-            y=call_vals.tolist(),
-            name="CALL OI変化(反転)",
+            x=active_strikes, y=call_y,
+            name="CALL",
             marker_color="rgba(60, 100, 220, 0.7)",
             showlegend=show_legend,
             legendgroup="call",
             hovertemplate="行使価格: %{x:,}<br>CALL OI変化: %{customdata:+,}<extra></extra>",
-            customdata=call_chg[t].tolist(),
-        ), row=1, col=col)
+            customdata=call_raw,
+        ), row=row, col=1)
 
-        # Max Pain vertical line (green)
+        # Max Pain vertical line
         mp_val = mp_list[t + 1]
         if mp_val:
             fig.add_vline(
                 x=mp_val,
                 line=dict(color="green", width=2, dash="dash"),
-                row=1, col=col,
-            )
-            # Annotation for MP value
-            yref_str = "y domain" if col == 1 else f"y{col} domain"
-            fig.add_annotation(
-                x=mp_val, y=1, yref=yref_str,
-                text=f"MP {mp_val:,}",
-                showarrow=False,
-                font=dict(color="green", size=10),
-                bgcolor="rgba(255,255,255,0.7)",
-                row=1, col=col,
+                row=row, col=1,
             )
 
-    # Layout
     fig.update_layout(
-        title=f"建玉変動 (直近5営業日) - {_format_cm(contract_month)}",
-        height=450,
+        title=f"建玉変動 (変動ありストライクのみ) - {_format_cm(contract_month)}",
+        height=280 * show_n + 60,
         template="plotly_white",
         barmode="relative",
         margin=dict(l=0, r=0, t=60, b=0),
-        legend=dict(orientation="h", y=-0.15),
+        legend=dict(orientation="h", y=-0.05),
     )
 
     # Axis formatting
     for i in range(1, show_n + 1):
-        yaxis = f"yaxis{i}" if i > 1 else "yaxis"
-        fig.update_layout(**{yaxis: dict(zeroline=True, zerolinewidth=1, zerolinecolor="black")})
-        xaxis = f"xaxis{i}" if i > 1 else "xaxis"
-        fig.update_layout(**{xaxis: dict(tickformat=",")})
+        yaxis_key = "yaxis" if i == 1 else f"yaxis{i}"
+        xaxis_key = "xaxis" if i == 1 else f"xaxis{i}"
+        fig.update_layout(**{
+            yaxis_key: dict(zeroline=True, zerolinewidth=1, zerolinecolor="black"),
+            xaxis_key: dict(tickformat=","),
+        })
 
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
-        "赤=PUT OI変化(上向き) / 青=CALL OI変化(下向き反転表示) / "
-        "緑線=Max Pain位置"
+        f"赤=PUT OI変化(上向き) / 青=CALL OI変化(下向き反転) / "
+        f"緑線=Max Pain / 表示ストライク: {len(active_strikes)}本 "
+        f"({min(active_strikes):,}~{max(active_strikes):,})"
     )
 
 
