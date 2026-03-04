@@ -555,8 +555,9 @@ def _render_oi_change_heatmap(
                 row=1, col=col,
             )
             # Annotation for MP value
+            yref_str = "y domain" if col == 1 else f"y{col} domain"
             fig.add_annotation(
-                x=mp_val, y=1, yref=f"y{col} domain",
+                x=mp_val, y=1, yref=yref_str,
                 text=f"MP {mp_val:,}",
                 showarrow=False,
                 font=dict(color="green", size=10),
