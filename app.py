@@ -27,7 +27,7 @@ st.set_page_config(
 ensure_cache_dirs()
 
 # Debug: deployment version
-_APP_VERSION = "2026-02-18a"
+_APP_VERSION = "2026-03-04a"
 
 
 def _make_cache_key(product, contract_month, wk_label, sk_str, kind):
