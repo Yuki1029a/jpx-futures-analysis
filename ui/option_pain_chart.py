@@ -344,9 +344,14 @@ def _render_oi_profile_section(available_cms: list[str]) -> None:
         st.info("有効行使価格が不足")
         return
 
+    # Load NK225 prices for overlay
+    _, _, nk_dates, nk_prices = _load_maxpain_timeseries_data()
+    nk_lookup = dict(zip(nk_dates, nk_prices))
+
     # --- Primary: OI change heatmap ---
     _render_oi_change_heatmap(
         dates, strikes, put_oi_list, call_oi_list, mp_list, selected_cm,
+        nk_lookup=nk_lookup,
     )
 
     # --- Max Pain summary metrics ---
@@ -506,6 +511,7 @@ def _render_oi_change_heatmap(
     call_oi_list: list[dict[int, int]],
     mp_list: list[int | None],
     contract_month: str,
+    nk_lookup: dict[date, float] | None = None,
 ) -> None:
     """Vertical subplots of daily OI changes, filtered to active strikes.
 
@@ -610,6 +616,26 @@ def _render_oi_change_heatmap(
                 row=row, col=1,
             )
 
+        # NK225 closing price vertical line
+        if nk_lookup:
+            nk_close = nk_lookup.get(dates[t + 1])
+            if nk_close:
+                fig.add_vline(
+                    x=nk_close,
+                    line=dict(color="black", width=1.5, dash="dot"),
+                    row=row, col=1,
+                )
+                if row_idx == 0:
+                    fig.add_annotation(
+                        x=nk_close, y=1,
+                        yref="y domain",
+                        text=f"NK {nk_close:,.0f}",
+                        showarrow=False,
+                        font=dict(color="black", size=9),
+                        bgcolor="rgba(255,255,255,0.8)",
+                        yanchor="top",
+                    )
+
     fig.update_layout(
         title=f"建玉変動 (変動ありストライクのみ) - {_format_cm(contract_month)}",
         height=280 * show_n + 60,
@@ -631,7 +657,8 @@ def _render_oi_change_heatmap(
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
         f"赤=PUT OI変化(上向き) / 青=CALL OI変化(下向き反転) / "
-        f"緑線=Max Pain / 表示ストライク: {len(active_strikes)}本 "
+        f"緑破線=Max Pain / 黒点線=NK225終値 / "
+        f"表示ストライク: {len(active_strikes)}本 "
         f"({min(active_strikes):,}~{max(active_strikes):,})"
     )
 
