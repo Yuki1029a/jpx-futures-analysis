@@ -20,15 +20,18 @@ def render_weekly_table(
     tab_label: str = "",
     stats_20d: dict | None = None,
     daily_futures_oi: dict | None = None,
+    extra_oi_series: list | None = None,
 ) -> None:
     """Render the main weekly analysis table.
 
     Args:
-        show_oi: If True, include OI columns (前週L/S/Net, 今週L/S/Net, 増減, 推定買/売, 方向).
-                 If False, show only daily volumes and weekly total (for session-specific tabs).
+        show_oi: If True, include OI columns.
         tab_label: Label shown in subheader for session context.
-        stats_20d: {participant_id: (avg, max)} - 20-day stats passed separately to avoid mutating cached rows.
-        daily_futures_oi: {date: DailyFuturesOI} - aggregate daily OI balance per trading day.
+        stats_20d: {participant_id: (avg, max)}.
+        daily_futures_oi: {date: DailyFuturesOI} - primary contract (期近 in SQ week).
+        extra_oi_series: list of (label_suffix, {date: DailyFuturesOI}) -
+                         additional contracts (e.g. 期先 in SQ week).
+                         Each adds 2 header rows (建玉残高 + 前日比).
     """
     cm_label = f"20{contract_month[:2]}年{contract_month[2:]}月限" if contract_month else ""
     title = f"{config.PRODUCT_DISPLAY_NAMES.get(product, product)} {cm_label}  ({week.label})"
@@ -40,12 +43,19 @@ def render_weekly_table(
         st.warning("選択された条件のデータがありません。")
         return
 
-    df = _build_display_dataframe(rows, week, show_oi, stats_20d, daily_futures_oi)
-
-    # Determine OI header row count (for styling exclusion)
-    oi_header_rows = 0
+    # Build list of (label, oi_dict) ─ primary first, then extras
+    oi_series: list = []
     if daily_futures_oi:
-        oi_header_rows = 2  # row 0 = 建玉残高, row 1 = 前日比
+        primary_label = "期近" if extra_oi_series else ""
+        oi_series.append((primary_label, daily_futures_oi))
+    if extra_oi_series:
+        for lbl, d in extra_oi_series:
+            if d:
+                oi_series.append((lbl, d))
+
+    df = _build_display_dataframe(rows, week, show_oi, stats_20d, oi_series)
+
+    oi_header_rows = len(oi_series) * 2  # 2 rows per contract (建玉残高 + 前日比)
 
     styled = _apply_table_styling(df, week, show_oi, oi_header_rows)
 
@@ -64,60 +74,56 @@ def _build_display_dataframe(
     week: WeekDefinition,
     show_oi: bool,
     stats_20d: dict | None = None,
-    daily_futures_oi: dict | None = None,
+    oi_series: list | None = None,
 ) -> pd.DataFrame:
     """Build the display DataFrame.
 
-    If daily_futures_oi is provided, row 0 = 建玉残高, row 1 = 前日比,
-    then participant rows follow from row 2 onward.
+    oi_series: list of (label_suffix, {date: DailyFuturesOI}). For each entry,
+    two header rows are emitted: 建玉残高[label] and 前日比[label].
     """
     day_col_names = []
     for td in week.trading_days:
         dow = _DOW_JP[td.weekday()]
         day_col_names.append(f"{td.strftime('%m/%d')}({dow})")
 
-    # --- OI header rows ---
-    oi_rows = []
-    if daily_futures_oi:
-        # Row 0: 建玉残高
-        rec_oi = {"参加者": "建玉残高"}
+    def _blank_row(label: str) -> dict:
+        rec = {"参加者": label}
         if show_oi:
-            rec_oi["前週L"] = None
-            rec_oi["前週S"] = None
-        for td, col_name in zip(week.trading_days, day_col_names):
-            oi_rec = daily_futures_oi.get(td)
-            rec_oi[col_name] = oi_rec.current_oi if oi_rec else None
-        rec_oi["週間計"] = None
-        rec_oi["20日平均"] = None
-        rec_oi["20日最大"] = None
+            rec["前週L"] = None
+            rec["前週S"] = None
+        for col in day_col_names:
+            rec[col] = None
+        rec["週間計"] = None
+        rec["20日平均"] = None
+        rec["20日最大"] = None
         if show_oi:
-            rec_oi["今週L"] = None
-            rec_oi["今週S"] = None
-            rec_oi["増減"] = None
-            rec_oi["推定買"] = None
-            rec_oi["推定売"] = None
-            rec_oi["方向"] = ""
-        oi_rows.append(rec_oi)
+            rec["今週L"] = None
+            rec["今週S"] = None
+            rec["増減"] = None
+            rec["推定買"] = None
+            rec["推定売"] = None
+            rec["方向"] = ""
+        return rec
 
-        # Row 1: 前日比
-        rec_chg = {"参加者": "前日比"}
-        if show_oi:
-            rec_chg["前週L"] = None
-            rec_chg["前週S"] = None
-        for td, col_name in zip(week.trading_days, day_col_names):
-            oi_rec = daily_futures_oi.get(td)
-            rec_chg[col_name] = oi_rec.net_change if oi_rec else None
-        rec_chg["週間計"] = None
-        rec_chg["20日平均"] = None
-        rec_chg["20日最大"] = None
-        if show_oi:
-            rec_chg["今週L"] = None
-            rec_chg["今週S"] = None
-            rec_chg["増減"] = None
-            rec_chg["推定買"] = None
-            rec_chg["推定売"] = None
-            rec_chg["方向"] = ""
-        oi_rows.append(rec_chg)
+    # --- OI header rows (2 per contract) ---
+    oi_rows = []
+    if oi_series:
+        for label_suffix, oi_dict in oi_series:
+            suffix = f"（{label_suffix}）" if label_suffix else ""
+
+            # 建玉残高 row
+            rec_oi = _blank_row(f"建玉残高{suffix}")
+            for td, col_name in zip(week.trading_days, day_col_names):
+                rec = oi_dict.get(td)
+                rec_oi[col_name] = rec.current_oi if rec else None
+            oi_rows.append(rec_oi)
+
+            # 前日比 row
+            rec_chg = _blank_row(f"前日比{suffix}")
+            for td, col_name in zip(week.trading_days, day_col_names):
+                rec = oi_dict.get(td)
+                rec_chg[col_name] = rec.net_change if rec else None
+            oi_rows.append(rec_chg)
 
     # --- Participant rows ---
     records = []
@@ -207,18 +213,20 @@ def _apply_table_styling(
             return "background-color: #ffc7ce; color: #9c0006; font-weight: bold"
         return ""
 
-    # Style OI header rows (建玉残高 row: bold blue background, 前日比 row: signed coloring)
+    # Style OI header rows. Each contract contributes 2 consecutive rows:
+    # even-offset (0,2,...) = 建玉残高 (bold blue bg), odd-offset = 前日比 (signed color)
     def _style_oi_header(row_idx, val, col):
-        """Style for OI header rows."""
-        if row_idx == 0:
+        offset = row_idx % 2
+        if offset == 0:
+            # 建玉残高
             if col in day_cols and pd.notna(val):
                 return "background-color: #dae8fc; color: #1a3c5e; font-weight: bold"
             return "background-color: #dae8fc; color: #1a3c5e"
-        elif row_idx == 1:
+        else:
+            # 前日比
             if col in day_cols:
                 return _color_signed(val)
             return ""
-        return ""
 
     styled = df.style
 

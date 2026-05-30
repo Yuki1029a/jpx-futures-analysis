@@ -9,6 +9,7 @@ from data.cache import ensure_cache_dirs
 from data.aggregator import (
     load_weekly_data, compute_20d_stats,
     load_option_weekly_data, load_daily_futures_oi, SESSION_MODES,
+    detect_sq_week_major, load_put_call_daily_volumes,
 )
 from ui.sidebar import render_sidebar
 from ui.weekly_table import render_weekly_table
@@ -17,6 +18,7 @@ from ui.option_strike_table import render_option_strike_table
 from ui.gex_chart import render_gex_section
 from ui.option_pain_chart import render_option_pain_section
 from ui.report_export import build_report_bytes
+from ui.put_call_volume import render_put_call_volume_section
 
 st.set_page_config(
     page_title="先物手口分析",
@@ -90,9 +92,9 @@ def main():
     opt_cm = selections["option_contract_month"]
     opt_pids = selections["option_participant_ids"]
 
-    # Top-level tabs: Futures, Options, GEX, Option Pain
-    main_tab1, main_tab2, main_tab3, main_tab4 = st.tabs(
-        ["先物分析", "オプション分析", "GEX分析", "オプションペイン"]
+    # Top-level tabs: Futures, Options, GEX, Option Pain, PUT/CALL Volume
+    main_tab1, main_tab2, main_tab3, main_tab4, main_tab5 = st.tabs(
+        ["先物分析", "オプション分析", "GEX分析", "オプションペイン", "PUT/CALL出来高"]
     )
 
     with main_tab1:
@@ -107,14 +109,41 @@ def main():
     with main_tab4:
         _render_option_pain_tab(week, opt_pids)
 
+    with main_tab5:
+        render_put_call_volume_section(week)
+
 
 def _render_futures_section(product, week, contract_month):
     """Render the futures analysis tabs."""
     tab_labels = list(SESSION_MODES.keys())
     tabs = st.tabs(tab_labels)
 
-    # Load daily futures OI once (same data for all session tabs)
+    # Load daily futures OI for selected contract
     daily_fut_oi = load_daily_futures_oi(week, product, contract_month)
+
+    # SQ week detection: in major months (3/6/9/12) up to SQ Friday, also
+    # load the next-major contract so 建玉残高 can be shown for both.
+    extra_oi_series: list = []
+    sq_pair = detect_sq_week_major(week)
+    if sq_pair:
+        near, nxt = sq_pair
+        # Primary contract = whatever user selected; extras = the other side
+        other_cm = None
+        primary_role = None
+        if contract_month == near:
+            other_cm, primary_role, other_role = nxt, "期近", "期先"
+        elif contract_month == nxt:
+            other_cm, primary_role, other_role = near, "期先", "期近"
+        if other_cm:
+            other_oi = load_daily_futures_oi(week, product, other_cm)
+            if other_oi:
+                other_label = f"{other_role} 20{other_cm[:2]}年{other_cm[2:]}月限"
+                extra_oi_series.append((other_label, other_oi))
+                # Also relabel the primary for clarity (passed via tuple-list path)
+        # Replace primary daily_fut_oi label by wrapping into extra_oi_series + a primary tuple
+        primary_label = f"{primary_role or '期近'} 20{contract_month[:2]}年{contract_month[2:]}月限"
+    else:
+        primary_label = ""
 
     for tab, label in zip(tabs, tab_labels):
         with tab:
@@ -131,13 +160,23 @@ def _render_futures_section(product, week, contract_month):
                 st.info("該当データなし")
                 continue
 
-            render_weekly_table(
-                rows, week, product, contract_month,
-                show_oi=True,
-                tab_label=label,
-                stats_20d=stats_20d,
-                daily_futures_oi=daily_fut_oi,
-            )
+            # When SQ week → use extra_oi_series to render multi rows.
+            # Use a "primary as first extra" trick: pass empty primary and
+            # both contracts as extras to get explicit (期近)/(期先) labels.
+            if extra_oi_series:
+                full_extras = [(primary_label, daily_fut_oi)] + extra_oi_series
+                render_weekly_table(
+                    rows, week, product, contract_month,
+                    show_oi=True, tab_label=label, stats_20d=stats_20d,
+                    daily_futures_oi=None,
+                    extra_oi_series=full_extras,
+                )
+            else:
+                render_weekly_table(
+                    rows, week, product, contract_month,
+                    show_oi=True, tab_label=label, stats_20d=stats_20d,
+                    daily_futures_oi=daily_fut_oi,
+                )
 
             if is_total:
                 st.markdown("---")
