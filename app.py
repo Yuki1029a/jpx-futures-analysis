@@ -6,10 +6,13 @@ from __future__ import annotations
 
 import streamlit as st
 from data.cache import ensure_cache_dirs
-from data.aggregator import (
-    load_weekly_data, compute_20d_stats,
-    load_option_weekly_data, load_daily_futures_oi, SESSION_MODES,
-    detect_sq_week_major, load_put_call_daily_volumes,
+from data.aggregator import SESSION_MODES, detect_sq_week_major
+from data.cached_loaders import (
+    wk_key,
+    cached_weekly_data,
+    cached_20d_stats,
+    cached_daily_futures_oi,
+    cached_option_weekly_data,
 )
 from ui.sidebar import render_sidebar
 from ui.weekly_table import render_weekly_table
@@ -32,41 +35,23 @@ ensure_cache_dirs()
 _APP_VERSION = "2026-03-04a"
 
 
-def _make_cache_key(product, contract_month, wk_label, sk_str, kind):
-    """Build a unique string key for session_state caching."""
-    return f"{kind}|{product}|{contract_month}|{wk_label}|{sk_str}"
-
-
 def _get_or_load(product, contract_month, week, sk_str, session_keys):
-    """Load futures data using session_state as cache."""
-    key_rows = _make_cache_key(product, contract_month, week.label, sk_str, "rows")
-    key_stats = _make_cache_key(product, contract_month, week.label, sk_str, "stats")
-
-    if key_rows not in st.session_state:
-        st.session_state[key_rows] = load_weekly_data(
-            week, product, contract_month,
-            session_keys=session_keys, include_oi=True,
-        )
-    if key_stats not in st.session_state:
-        st.session_state[key_stats] = compute_20d_stats(
-            week, product, contract_month,
-            session_keys=session_keys,
-        )
-    return st.session_state[key_rows], st.session_state[key_stats]
+    """Load futures data via @st.cache_data (server-wide, 5-min TTL)."""
+    wk = wk_key(week)
+    rows = cached_weekly_data(wk, product, contract_month, sk_str)
+    stats = cached_20d_stats(wk, product, contract_month, sk_str)
+    return rows, stats
 
 
 def _get_or_load_options(week, contract_month, sk_str, session_keys, participant_ids):
-    """Load option data using session_state as cache."""
-    pid_str = ",".join(sorted(participant_ids)) if participant_ids is not None else "ALL"
-    key = f"opt_rows_v2|{week.label}|{contract_month}|{sk_str}|{pid_str}"
-    if key not in st.session_state:
-        st.session_state[key] = load_option_weekly_data(
-            week,
-            contract_month=contract_month,
-            session_keys=session_keys,
-            participant_ids=participant_ids,
-        )
-    return st.session_state[key]
+    """Load option data via @st.cache_data (server-wide, 5-min TTL)."""
+    if participant_ids is None:
+        pid_str = "ALL"
+    elif not participant_ids:
+        pid_str = ""
+    else:
+        pid_str = ",".join(sorted(participant_ids))
+    return cached_option_weekly_data(wk_key(week), contract_month, sk_str, pid_str)
 
 
 def main():
@@ -118,8 +103,10 @@ def _render_futures_section(product, week, contract_month):
     tab_labels = list(SESSION_MODES.keys())
     tabs = st.tabs(tab_labels)
 
-    # Load daily futures OI for selected contract
-    daily_fut_oi = load_daily_futures_oi(week, product, contract_month)
+    wk = wk_key(week)
+
+    # Load daily futures OI for selected contract (cached)
+    daily_fut_oi = cached_daily_futures_oi(wk, product, contract_month)
 
     # SQ week detection: in major months (3/6/9/12) up to SQ Friday, also
     # load the next-major contract so 建玉残高 can be shown for both.
@@ -135,7 +122,7 @@ def _render_futures_section(product, week, contract_month):
         elif contract_month == nxt:
             other_cm, primary_role, other_role = near, "期先", "期近"
         if other_cm:
-            other_oi = load_daily_futures_oi(week, product, other_cm)
+            other_oi = cached_daily_futures_oi(wk, product, other_cm)
             if other_oi:
                 other_label = f"{other_role} 20{other_cm[:2]}年{other_cm[2:]}月限"
                 extra_oi_series.append((other_label, other_oi))

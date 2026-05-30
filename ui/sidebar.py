@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import streamlit as st
-from data.aggregator import (
-    build_available_weeks,
-    get_available_contract_months,
-    get_available_option_contract_months,
-    get_option_participants,
+from data.aggregator import build_available_weeks
+from data.cached_loaders import (
+    wk_key,
+    cached_contract_months,
+    cached_option_contract_months,
+    cached_option_participants,
 )
 import config
 
@@ -44,8 +45,10 @@ def render_sidebar() -> dict:
         format_func=lambda w: w.label,
     )
 
+    wk = wk_key(week)
+
     # Futures contract month selector
-    contract_months = get_available_contract_months(week, product)
+    contract_months = cached_contract_months(wk, product)
     if not contract_months or contract_months == [""]:
         st.sidebar.warning("限月データなし")
         st.stop()
@@ -61,7 +64,7 @@ def render_sidebar() -> dict:
     st.sidebar.subheader("オプション設定")
 
     # Option contract month
-    opt_months = get_available_option_contract_months(week)
+    opt_months = cached_option_contract_months(wk)
     option_contract_month = ""
     if opt_months:
         option_contract_month = st.sidebar.selectbox(
@@ -75,7 +78,7 @@ def render_sidebar() -> dict:
     # Option participant filter (individual checkboxes)
     option_participant_ids = None  # None = all participants
     if option_contract_month:
-        participants = get_option_participants(week, option_contract_month)
+        participants = cached_option_participants(wk, option_contract_month)
         if participants:
             with st.sidebar.expander("参加者フィルター", expanded=False):
                 # Select all / Deselect all buttons

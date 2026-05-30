@@ -167,12 +167,9 @@ def get_available_contract_months(
 ) -> list[str]:
     """Return available contract months (YYMM) for a given week and product.
 
-    Unions contract months from:
-      - start_oi_date OI report (pre-week snapshot)
-      - end_oi_date OI report (post-week snapshot, if available)
-      - Daily futures OI for each trading day in the week
-    This ensures the SQ'd near-month contract isn't dropped when end_oi_date
-    falls on the SQ Friday (where the SQ'd contract has OI=0).
+    Unions contract months from start_oi_date AND end_oi_date OI reports.
+    The previous-Friday OI (start) still has the to-be-SQ'd contract, so this
+    recovers 期近 even when end_oi_date is the SQ Friday itself.
     """
     months: set[str] = set()
     for d in [week.start_oi_date, week.end_oi_date]:
@@ -181,34 +178,7 @@ def get_available_contract_months(
         for r in _load_oi_for_date(d, product):
             if r.contract_month:
                 months.add(r.contract_month)
-
-    # Also probe daily futures OI for each trading day — captures contracts
-    # that were traded during the week even if absent in weekly OI snapshots.
-    for td in week.trading_days:
-        for r in _load_all_daily_futures_oi_for_date(td):
-            if r.product == product and r.contract_month:
-                months.add(r.contract_month)
-
     return sorted(months) if months else [""]
-
-
-def _load_all_daily_futures_oi_for_date(d: date) -> list[DailyFuturesOI]:
-    """Load all DailyFuturesOI records for a date (no product/month filter)."""
-    cache_key = f"daily_futures_oi_all_{d.strftime('%Y%m%d')}"
-    if cache_key in _daily_futures_oi_all_cache:
-        return _daily_futures_oi_all_cache[cache_key]
-    content = fetcher.download_daily_oi_excel(d)
-    if content is None:
-        return []
-    try:
-        records = parse_daily_futures_oi_excel(content)
-    except Exception:
-        return []
-    _daily_futures_oi_all_cache[cache_key] = records
-    return records
-
-
-_daily_futures_oi_all_cache: dict[str, list[DailyFuturesOI]] = {}
 
 
 def detect_sq_week_major(week: WeekDefinition) -> Optional[tuple[str, str]]:
@@ -606,31 +576,20 @@ def get_available_option_contract_months(
 ) -> list[str]:
     """Return available option contract months (YYMM) for a given week.
 
-    Unions contract months from BOTH OI snapshots and EVERY trading day's
-    daily OI balance file. Previously this used `break` after finding the
-    first non-empty OI date — that dropped the SQ'd near-month contract
-    whose OI is already cleared by end_oi_date.
+    Unions contract months from start_oi_date AND end_oi_date OI snapshots.
+    Falls back to first trading day's volume data if both OI are empty.
     """
     oi_months: set[str] = set()
-
-    # Both OI snapshots (no early break!)
     for d in [week.end_oi_date, week.start_oi_date]:
         if d is None:
             continue
         for r in _load_option_oi_raw(d):
             if r.contract_month:
                 oi_months.add(r.contract_month)
-
-    # All trading days' daily OI balances (covers contracts active mid-week)
-    for td in week.trading_days:
-        for r in _load_daily_oi_for_date(td):
-            if r.contract_month:
-                oi_months.add(r.contract_month)
-
     if oi_months:
         return sorted(oi_months)
 
-    # Fallback: check volume data from the first trading day
+    # Fallback: volume data from first trading day
     if week.trading_days:
         vol_records = _load_option_volume_for_market_date(
             week.trading_days[0], SESSION_ALL
@@ -638,7 +597,6 @@ def get_available_option_contract_months(
         vol_months = set(r.contract_month for r in vol_records if r.contract_month)
         if vol_months:
             return sorted(vol_months)
-
     return []
 
 

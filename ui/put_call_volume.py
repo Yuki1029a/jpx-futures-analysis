@@ -8,9 +8,10 @@ from __future__ import annotations
 import streamlit as st
 import pandas as pd
 from models import WeekDefinition
-from data.aggregator import (
-    load_put_call_daily_volumes,
-    get_available_option_contract_months,
+from data.cached_loaders import (
+    wk_key,
+    cached_option_contract_months,
+    cached_put_call_daily_volumes,
 )
 
 
@@ -27,7 +28,8 @@ def render_put_call_volume_section(week: WeekDefinition) -> None:
     """
     st.subheader(f"PUT/CALL 日次出来高  ({week.label})")
 
-    contract_months = get_available_option_contract_months(week)
+    wk = wk_key(week)
+    contract_months = cached_option_contract_months(wk)
     if not contract_months:
         st.info("オプションデータなし")
         return
@@ -46,7 +48,7 @@ def render_put_call_volume_section(week: WeekDefinition) -> None:
         target_label = selected
 
     with st.spinner("PUT/CALL データ集計中..."):
-        daily = load_put_call_daily_volumes(week, target_cm)
+        daily = cached_put_call_daily_volumes(wk, target_cm)
 
     if not daily:
         st.info("該当データなし")
