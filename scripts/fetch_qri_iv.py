@@ -6,23 +6,28 @@ Source: https://svc.qri.jp/jpx/nkopm/[index]
   Requires Referer: https://www.jpx.co.jp/
 
 Output:
-  cache/qri_iv/raw/YYYYMMDD/YYYYMMDD_HHMM.parquet
+  Local:  cache/qri_iv/raw/YYYYMMDD/YYYYMMDD_HHMMSS.parquet
+  R2:     qri_iv/raw/YYYYMMDD/YYYYMMDD_HHMMSS.parquet  (--r2 flag)
     One file per fetch run, all months × all strikes in one table.
     Append-friendly: each row carries fetch_time + source_update_time so
     downstream code can build time-series easily.
 
 Usage:
-  python scripts/fetch_qri_iv.py             # one-shot fetch
-  python scripts/fetch_qri_iv.py --loop      # run every 15 min until Ctrl+C
-  python scripts/fetch_qri_iv.py --max 5     # probe up to /jpx/nkopm/4 (default 8)
+  python scripts/fetch_qri_iv.py             # one-shot, local only
+  python scripts/fetch_qri_iv.py --r2        # one-shot, upload to R2 too
+  python scripts/fetch_qri_iv.py --loop --r2 # every 15 min, R2 upload
+  python scripts/fetch_qri_iv.py --r2 --no-local  # R2 only, skip local file
 """
 from __future__ import annotations
 
 import argparse
+import io
 import logging
+import os
 import re
 import sys
 import time
+import tomllib
 from datetime import datetime, date
 from pathlib import Path
 from typing import Optional
@@ -42,8 +47,81 @@ _DEFAULT_MAX_INDEX = 8  # probe /0../7 by default; stop on first failure
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _OUT_ROOT = _PROJECT_ROOT / "cache" / "qri_iv" / "raw"
+_R2_PREFIX = "qri_iv/raw"  # R2 key prefix
 
 logger = logging.getLogger("fetch_qri_iv")
+
+
+# ---------------------------------------------------------------------------
+# R2 (Cloudflare S3-compatible) — standalone client for CLI use
+# ---------------------------------------------------------------------------
+
+_r2_client = None
+_r2_bucket = ""
+_r2_init_done = False
+
+
+def _load_r2_config() -> dict:
+    """Read R2 creds from .streamlit/secrets.toml, else env vars."""
+    secrets_path = _PROJECT_ROOT / ".streamlit" / "secrets.toml"
+    if secrets_path.exists():
+        try:
+            with open(secrets_path, "rb") as f:
+                conf = tomllib.load(f).get("r2", {})
+            if conf.get("account_id") and conf.get("access_key_id"):
+                return {
+                    "account_id": conf.get("account_id", ""),
+                    "access_key_id": conf.get("access_key_id", ""),
+                    "secret_access_key": conf.get("secret_access_key", ""),
+                    "bucket_name": conf.get("bucket_name", "jpx-data"),
+                }
+        except Exception as e:
+            logger.warning("secrets.toml parse failed: %s", e)
+    return {
+        "account_id": os.environ.get("R2_ACCOUNT_ID", ""),
+        "access_key_id": os.environ.get("R2_ACCESS_KEY_ID", ""),
+        "secret_access_key": os.environ.get("R2_SECRET_ACCESS_KEY", ""),
+        "bucket_name": os.environ.get("R2_BUCKET_NAME", "jpx-data"),
+    }
+
+
+def _init_r2() -> bool:
+    """Lazy-init R2 client. Returns True if usable."""
+    global _r2_client, _r2_bucket, _r2_init_done
+    if _r2_init_done:
+        return _r2_client is not None
+    _r2_init_done = True
+
+    conf = _load_r2_config()
+    if not (conf["account_id"] and conf["access_key_id"] and conf["secret_access_key"]):
+        logger.warning("R2 credentials not found; --r2 will be a no-op")
+        return False
+    try:
+        import boto3
+        _r2_client = boto3.client(
+            "s3",
+            endpoint_url=f"https://{conf['account_id']}.r2.cloudflarestorage.com",
+            aws_access_key_id=conf["access_key_id"],
+            aws_secret_access_key=conf["secret_access_key"],
+            region_name="auto",
+        )
+        _r2_bucket = conf["bucket_name"]
+        logger.info("R2 initialized: bucket=%s", _r2_bucket)
+        return True
+    except Exception as e:
+        logger.warning("R2 init failed: %s", e)
+        return False
+
+
+def _r2_put(key: str, content: bytes) -> bool:
+    if not _init_r2():
+        return False
+    try:
+        _r2_client.put_object(Bucket=_r2_bucket, Key=key, Body=content)
+        return True
+    except Exception as e:
+        logger.warning("R2 put failed for %s: %s", key, e)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -347,8 +425,17 @@ def parse_page(html: str, *, fetch_time: datetime) -> list[dict]:
 # Driver
 # ---------------------------------------------------------------------------
 
-def run_once(max_index: int = _DEFAULT_MAX_INDEX, out_root: Path = _OUT_ROOT) -> Optional[Path]:
-    """Single fetch over all available months. Returns output Parquet path."""
+def run_once(
+    max_index: int = _DEFAULT_MAX_INDEX,
+    out_root: Path = _OUT_ROOT,
+    *,
+    save_local: bool = True,
+    save_r2: bool = False,
+) -> Optional[str]:
+    """Single fetch over all available months.
+
+    Returns a descriptive output location string, or None if nothing fetched.
+    """
     fetch_time = datetime.now()
     all_records: list[dict] = []
     consecutive_misses = 0
@@ -371,19 +458,42 @@ def run_once(max_index: int = _DEFAULT_MAX_INDEX, out_root: Path = _OUT_ROOT) ->
         return None
 
     df = pd.DataFrame(all_records)
-    day_dir = out_root / fetch_time.strftime("%Y%m%d")
-    day_dir.mkdir(parents=True, exist_ok=True)
-    fname = day_dir / fetch_time.strftime("%Y%m%d_%H%M%S.parquet")
-    df.to_parquet(fname, index=False)
-    logger.info("Wrote %d records → %s", len(df), fname)
-    return fname
+
+    # Serialize to parquet bytes once, reuse for both sinks
+    buf = io.BytesIO()
+    df.to_parquet(buf, index=False)
+    parquet_bytes = buf.getvalue()
+
+    day = fetch_time.strftime("%Y%m%d")
+    stamp = fetch_time.strftime("%Y%m%d_%H%M%S")
+    rel_key = f"{day}/{stamp}.parquet"
+    locations = []
+
+    if save_local:
+        day_dir = out_root / day
+        day_dir.mkdir(parents=True, exist_ok=True)
+        fpath = day_dir / f"{stamp}.parquet"
+        fpath.write_bytes(parquet_bytes)
+        locations.append(str(fpath))
+
+    if save_r2:
+        r2_key = f"{_R2_PREFIX}/{rel_key}"
+        if _r2_put(r2_key, parquet_bytes):
+            locations.append(f"r2://{_r2_bucket}/{r2_key}")
+        else:
+            logger.warning("R2 upload failed for %s", r2_key)
+
+    logger.info("Wrote %d records → %s", len(df), " , ".join(locations) or "(nowhere!)")
+    return " , ".join(locations) if locations else None
 
 
-def run_loop(interval_min: int, max_index: int, out_root: Path):
+def run_loop(interval_min: int, max_index: int, out_root: Path,
+             save_local: bool, save_r2: bool):
     while True:
         start = time.time()
         try:
-            run_once(max_index=max_index, out_root=out_root)
+            run_once(max_index=max_index, out_root=out_root,
+                     save_local=save_local, save_r2=save_r2)
         except Exception as e:
             logger.exception("run_once failed: %s", e)
         elapsed = time.time() - start
@@ -399,6 +509,9 @@ def main():
     p.add_argument("--max", type=int, default=_DEFAULT_MAX_INDEX,
                    help="Highest /jpx/nkopm/<i> index to probe (default 8)")
     p.add_argument("--out", type=Path, default=_OUT_ROOT, help="Output root dir")
+    p.add_argument("--r2", action="store_true", help="Upload parquet to Cloudflare R2")
+    p.add_argument("--no-local", action="store_true",
+                   help="Skip local file write (use with --r2)")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -407,10 +520,16 @@ def main():
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
+    save_local = not args.no_local
+    save_r2 = args.r2
+    if args.no_local and not args.r2:
+        logger.error("--no-local requires --r2 (otherwise nothing is saved)")
+        sys.exit(2)
+
     if args.loop:
-        run_loop(args.interval, args.max, args.out)
+        run_loop(args.interval, args.max, args.out, save_local, save_r2)
     else:
-        path = run_once(args.max, args.out)
+        path = run_once(args.max, args.out, save_local=save_local, save_r2=save_r2)
         if path is None:
             sys.exit(1)
 
