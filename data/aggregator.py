@@ -576,20 +576,33 @@ def get_available_option_contract_months(
 ) -> list[str]:
     """Return available option contract months (YYMM) for a given week.
 
-    Unions contract months from start_oi_date AND end_oi_date OI snapshots.
-    Falls back to first trading day's volume data if both OI are empty.
+    Unions three sources so 期先 (far months) are selectable, not just 期近:
+      1. 参加者OI (大口建玉) — JPX publishes 期近 only, but carries 手口 breakdown.
+      2. daily-OI (集計) — covers 期近+期先 (no 手口 breakdown).
+      3. 出来高 — fallback when both OI sources are empty.
+
+    Note: 手口(参加者別)データはJPX仕様で期近限定。期先は集計OIベースのみ表示可。
     """
-    oi_months: set[str] = set()
+    months: set[str] = set()
+
+    # 1. 参加者OI snapshots (start/end) — typically 期近 only
     for d in [week.end_oi_date, week.start_oi_date]:
         if d is None:
             continue
         for r in _load_option_oi_raw(d):
             if r.contract_month:
-                oi_months.add(r.contract_month)
-    if oi_months:
-        return sorted(oi_months)
+                months.add(r.contract_month)
 
-    # Fallback: volume data from first trading day
+    # 2. 集計daily-OI across the week's trading days — adds 期先
+    for td in week.trading_days:
+        for r in _load_daily_oi_for_date(td):
+            if r.contract_month:
+                months.add(r.contract_month)
+
+    if months:
+        return sorted(months)
+
+    # 3. Fallback: volume data from first trading day
     if week.trading_days:
         vol_records = _load_option_volume_for_market_date(
             week.trading_days[0], SESSION_ALL

@@ -109,6 +109,8 @@ def render_sidebar() -> dict:
                     option_participant_ids = selected_pids
                 else:
                     option_participant_ids = []  # empty = no data
+        else:
+            st.sidebar.caption("※この限月は集計OIのみ（手口データは期近限定）")
 
     return {
         "product": product,

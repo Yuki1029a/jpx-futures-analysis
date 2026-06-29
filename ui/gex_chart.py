@@ -32,13 +32,26 @@ def render_gex_section(
         st.warning("オプションデータがありません。")
         return
 
+    # --- Extract OI from latest available date (needed before spot default) ---
+    as_of, put_oi, call_oi, all_strikes = _extract_latest_oi(rows)
+
+    if not all_strikes:
+        st.info("建玉データがありません。")
+        return
+
+    # Default spot = actual NK225 close on/near the OI date (fallback: ATM strike)
+    default_spot = _default_spot(as_of, put_oi, call_oi)
+
     # --- Controls ---
     c1, c2, c3 = st.columns(3)
     with c1:
         spot = st.number_input(
             "原資産価格 (日経225)",
-            value=38500, min_value=10000, max_value=60000, step=100,
-            key="gex_spot",
+            value=int(min(200000, max(10000, round(default_spot)))),
+            min_value=10000, max_value=200000, step=100,
+            # key scoped to OI date so the auto-default follows date/week changes
+            key=f"gex_spot_{as_of.isoformat()}",
+            help="OI基準日のNK225終値を自動設定（手動変更可）",
         )
     with c2:
         iv_pct = st.slider("IV (%)", 5, 60, 20, key="gex_iv")
@@ -47,13 +60,6 @@ def render_gex_section(
         st.metric("SQ日", sq.strftime("%Y/%m/%d"))
 
     sigma = iv_pct / 100.0
-
-    # --- Extract OI from latest available date ---
-    as_of, put_oi, call_oi, all_strikes = _extract_latest_oi(rows)
-
-    if not all_strikes:
-        st.info("建玉データがありません。")
-        return
 
     dow = _DOW_JP[as_of.weekday()]
     st.caption(f"建玉基準日: {as_of.strftime('%Y/%m/%d')}({dow})  |  "
@@ -151,6 +157,40 @@ def _calc_spot_flip(
                 best_dist = dist
                 best_flip = float(flip)
     return best_flip
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _nk225_close_on_or_before(target: date) -> float | None:
+    """NK225 (^N225) cash close on `target`, else the nearest prior session."""
+    try:
+        import yfinance as yf
+        hist = yf.Ticker("^N225").history(period="6mo")
+        if hist.empty:
+            return None
+        pairs = [(d.date(), float(v)) for d, v in zip(hist.index, hist["Close"].values)]
+        on_before = [v for d, v in pairs if d <= target]
+        if on_before:
+            return on_before[-1]
+        return pairs[-1][1]  # target predates history → latest available
+    except Exception:
+        return None
+
+
+def _default_spot(
+    as_of: date, put_oi: dict[int, int], call_oi: dict[int, int],
+) -> float:
+    """Best-effort current underlying: real NK225 close, else OI-weighted ATM."""
+    close = _nk225_close_on_or_before(as_of)
+    if close:
+        return close
+    strikes = set(put_oi) | set(call_oi)
+    if not strikes:
+        return 40000.0
+    tot = sum(put_oi.get(k, 0) + call_oi.get(k, 0) for k in strikes)
+    if tot > 0:
+        return sum(k * (put_oi.get(k, 0) + call_oi.get(k, 0)) for k in strikes) / tot
+    s = sorted(strikes)
+    return float(s[len(s) // 2])
 
 
 def _extract_latest_oi(
