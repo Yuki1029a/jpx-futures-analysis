@@ -149,6 +149,125 @@ def intraday_atm(day_str: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def strike_daily_series(days: list[str], cm: str, option_type: str,
+                        strikes: list[int] | None = None) -> pd.DataFrame:
+    """Per-strike daily series (last snapshot per day) for one month x type.
+
+    Returns: day(date), strike, iv_pct(eff_iv), oi, volume.
+    """
+    rows = []
+    for d in days:
+        keys = snapshot_keys(d)
+        if not keys:
+            continue
+        df = load_snapshot(keys[-1])
+        if df is None or df.empty:
+            continue
+        m = with_eff_iv(df)
+        g = m[(m.contract_month == cm) & (m.option_type == option_type)]
+        if strikes:
+            g = g[g.strike.isin(strikes)]
+        dt = date(int(d[:4]), int(d[4:6]), int(d[6:8]))
+        for _, r in g.iterrows():
+            rows.append({
+                "day": dt, "strike": int(r.strike),
+                "iv_pct": None if pd.isna(r.eff_iv) else r.eff_iv * 100.0,
+                "oi": None if pd.isna(r.oi) else float(r.oi),
+                "volume": None if pd.isna(r.volume) else float(r.volume),
+            })
+    return pd.DataFrame(rows)
+
+
+def strike_intraday_series(day_str: str, cm: str, option_type: str,
+                           strikes: list[int]) -> pd.DataFrame:
+    """Per-strike IV across all snapshots of one day. Returns: time, strike, iv_pct."""
+    rows = []
+    for key in snapshot_keys(day_str):
+        df = load_snapshot(key)
+        if df is None or df.empty:
+            continue
+        m = with_eff_iv(df)
+        g = m[(m.contract_month == cm) & (m.option_type == option_type) & m.strike.isin(strikes)]
+        tl = key_time_label(key)
+        for _, r in g.iterrows():
+            if pd.notna(r.eff_iv):
+                rows.append({"time": tl, "strike": int(r.strike), "iv_pct": r.eff_iv * 100.0})
+    return pd.DataFrame(rows)
+
+
+_QUAD = {(1, 1): "新規買い", (1, -1): "新規売り", (-1, 1): "買い戻し", (-1, -1): "手仕舞い"}
+
+
+def flow_judgement(days: list[str], cm: str) -> pd.DataFrame:
+    """dOI x dIV quadrant per (strike, type) using the last two data days.
+
+    建玉はJPX T+1公表（QRIのoiは前日残）のため、dOI は概ね「前営業日の売買」を反映。
+    dIV も同じ2時点（各日最終スナップショット）の差で併記する。
+    Returns: option_type, strike, oi, d_oi, iv_pct, d_iv_pct, volume, judge.
+    """
+    # 早朝スナップショットのみの日はOIが未更新（前日と同値）のため、
+    # 「OIが実際に動いた」直近の2時点ペアを探す（最大6データ日さかのぼり）
+    snaps = []
+    for d in reversed(days):
+        keys = snapshot_keys(d)
+        if not keys:
+            continue
+        df = load_snapshot(keys[-1])
+        if df is not None and not df.empty:
+            snaps.append(with_eff_iv(df))
+        if len(snaps) >= 6:
+            break
+    if len(snaps) < 2:
+        return pd.DataFrame()
+
+    def _oi_vec(df):
+        g = df[df.contract_month == cm]
+        return g.set_index(["option_type", "strike"]).oi
+
+    cur = snaps[0]
+    prv = snaps[1]
+    ov0 = _oi_vec(cur)
+    for cand in snaps[1:]:
+        ov = _oi_vec(cand)
+        common = ov0.index.intersection(ov.index)
+        if len(common) and (ov0.loc[common].fillna(0) - ov.loc[common].fillna(0)).abs().sum() > 0:
+            prv = cand
+            break
+
+    def _slice(df):
+        g = df[df.contract_month == cm]
+        return g.set_index(["option_type", "strike"])
+
+    c, p = _slice(cur), _slice(prv)
+    idx = c.index.intersection(p.index)
+    rows = []
+    for key in idx:
+        rc, rp = c.loc[key], p.loc[key]
+        if isinstance(rc, pd.DataFrame):
+            rc = rc.iloc[0]
+        if isinstance(rp, pd.DataFrame):
+            rp = rp.iloc[0]
+        d_oi = None
+        if pd.notna(rc.oi) and pd.notna(rp.oi):
+            d_oi = float(rc.oi - rp.oi)
+        d_iv = None
+        if pd.notna(rc.eff_iv) and pd.notna(rp.eff_iv):
+            d_iv = (rc.eff_iv - rp.eff_iv) * 100.0
+        judge = ""
+        if d_oi is not None and d_iv is not None and d_oi != 0:
+            judge = _QUAD[(1 if d_oi > 0 else -1, 1 if d_iv >= 0 else -1)]
+        rows.append({
+            "option_type": key[0], "strike": int(key[1]),
+            "oi": None if pd.isna(rc.oi) else float(rc.oi),
+            "d_oi": d_oi,
+            "iv_pct": None if pd.isna(rc.eff_iv) else rc.eff_iv * 100.0,
+            "d_iv_pct": d_iv,
+            "volume": None if pd.isna(rc.volume) else float(rc.volume),
+            "judge": judge,
+        })
+    return pd.DataFrame(rows)
+
+
 def daily_atm_series(days: list[str]) -> pd.DataFrame:
     """Last-snapshot ATM IV / skew per month for each day.
 
