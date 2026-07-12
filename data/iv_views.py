@@ -131,24 +131,6 @@ def smile_frame(df: pd.DataFrame, months: list[str]) -> pd.DataFrame:
     return m[["contract_month", "option_type", "strike", "iv_pct", "oi"]].sort_values("strike")
 
 
-def intraday_atm(day_str: str) -> pd.DataFrame:
-    """ATM IV per month across all snapshots of a day.
-
-    Returns columns: time (label), contract_month, atm_iv_pct.
-    """
-    rows = []
-    for key in snapshot_keys(day_str):
-        df = load_snapshot(key)
-        if df is None or df.empty:
-            continue
-        tl = key_time_label(key)
-        for cm, g in with_eff_iv(df).groupby("contract_month"):
-            atm = _atm_row(g)
-            if atm is not None and pd.notna(atm.eff_iv):
-                rows.append({"time": tl, "contract_month": cm, "atm_iv_pct": atm.eff_iv * 100.0})
-    return pd.DataFrame(rows)
-
-
 def strike_daily_series(days: list[str], cm: str, option_type: str,
                         strikes: list[int] | None = None) -> pd.DataFrame:
     """Per-strike daily series (last snapshot per day) for one month x type.
@@ -196,76 +178,113 @@ def strike_intraday_series(day_str: str, cm: str, option_type: str,
 
 
 _QUAD = {(1, 1): "新規買い", (1, -1): "新規売り", (-1, 1): "買い戻し", (-1, -1): "手仕舞い"}
+_NEUTRAL_BAND = 0.05  # %pt: |超過ΔIV| がこれ未満は方向を断定しない
 
 
-def flow_judgement(days: list[str], cm: str) -> pd.DataFrame:
-    """dOI x dIV quadrant per (strike, type) using the last two data days.
+def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
+    """Δ建玉×ΔIV quadrant per (strike, type), IV窓をOIの取引日窓に整合させる。
 
-    建玉はJPX T+1公表（QRIのoiは前日残）のため、dOI は概ね「前営業日の売買」を反映。
-    dIV も同じ2時点（各日最終スナップショット）の差で併記する。
-    Returns: option_type, strike, oi, d_oi, iv_pct, d_iv_pct, volume, judge.
+    QRIのoiはJPX清算後残高のT+1反映のため、データ日 d の最終スナップショットの
+    OIは「dより前の直近取引日」引け残。各日最終スナップを新しい順に snaps とし、
+      k  = OIが snaps[0] から最初に動いたデータ日 index
+      k2 = snaps[k] からさらに動いた index
+    とすると Δ建玉 = OI[0]−OI[k] は取引日窓 (day[k2], day[k]] の売買を反映する。
+    同じ取引日窓の気配変化は ΔIV = eff_iv[k]−eff_iv[k2]（1データ日前へシフト）。
+    地合い（サーフェス平行移動）は限月内・両気配ストライクのΔIV中央値 level で
+    控除し、超過ΔIV = ΔIV−level の符号で判定する。
+    Returns (df, meta):
+      df   : option_type, strike, oi, d_oi, iv_pct, d_iv_pct, d_iv_ex_pct,
+             volume, judge
+      meta : oi_days=(当日,比較日), iv_days=(IV当日,IV比較日),
+             level_pct, n_level, aligned(bool: IV窓シフト成立)
     """
-    # 早朝スナップショットのみの日はOIが未更新（前日と同値）のため、
-    # 「OIが実際に動いた」直近の2時点ペアを探す（最大6データ日さかのぼり）
-    snaps = []
+    snaps: list[tuple[str, pd.DataFrame]] = []
     for d in reversed(days):
         keys = snapshot_keys(d)
         if not keys:
             continue
         df = load_snapshot(keys[-1])
         if df is not None and not df.empty:
-            snaps.append(with_eff_iv(df))
-        if len(snaps) >= 6:
+            snaps.append((d, with_eff_iv(df)))
+        if len(snaps) >= 10:
             break
+    meta = {"oi_days": None, "iv_days": None,
+            "level_pct": 0.0, "n_level": 0, "aligned": True}
     if len(snaps) < 2:
-        return pd.DataFrame()
-
-    def _oi_vec(df):
-        g = df[df.contract_month == cm]
-        return g.set_index(["option_type", "strike"]).oi
-
-    cur = snaps[0]
-    prv = snaps[1]
-    ov0 = _oi_vec(cur)
-    for cand in snaps[1:]:
-        ov = _oi_vec(cand)
-        common = ov0.index.intersection(ov.index)
-        if len(common) and (ov0.loc[common].fillna(0) - ov.loc[common].fillna(0)).abs().sum() > 0:
-            prv = cand
-            break
+        return pd.DataFrame(), meta
 
     def _slice(df):
         g = df[df.contract_month == cm]
+        g = g[~g.duplicated(subset=["option_type", "strike"])]
         return g.set_index(["option_type", "strike"])
 
-    c, p = _slice(cur), _slice(prv)
-    idx = c.index.intersection(p.index)
+    sl = [(d, _slice(df)) for d, df in snaps]
+
+    def _oi_moved(a, b):
+        common = a.index.intersection(b.index)
+        if not len(common):
+            return False
+        return (a.oi.loc[common].fillna(0) - b.oi.loc[common].fillna(0)).abs().sum() > 0
+
+    k = next((i for i in range(1, len(sl)) if _oi_moved(sl[0][1], sl[i][1])), None)
+    if k is None:
+        return pd.DataFrame(), meta
+    k2 = next((j for j in range(k + 1, len(sl)) if _oi_moved(sl[k][1], sl[j][1])), None)
+    if k2 is None:
+        ivc_i, ivp_i = 0, k  # シフト先データ不足 → 未整合のまま近似
+        meta["aligned"] = False
+    else:
+        ivc_i, ivp_i = k, k2
+
+    cur, prv = sl[0][1], sl[k][1]
+    ivc, ivp = sl[ivc_i][1], sl[ivp_i][1]
+    meta["oi_days"] = (sl[0][0], sl[k][0])
+    meta["iv_days"] = (sl[ivc_i][0], sl[ivp_i][0])
+
+    idx = cur.index.intersection(prv.index)
     rows = []
+    lvl_q, lvl_all = [], []
     for key in idx:
-        rc, rp = c.loc[key], p.loc[key]
-        if isinstance(rc, pd.DataFrame):
-            rc = rc.iloc[0]
-        if isinstance(rp, pd.DataFrame):
-            rp = rp.iloc[0]
+        rc, rp = cur.loc[key], prv.loc[key]
         d_oi = None
         if pd.notna(rc.oi) and pd.notna(rp.oi):
             d_oi = float(rc.oi - rp.oi)
+        c_iv = ivc.eff_iv.get(key)
+        p_iv = ivp.eff_iv.get(key)
         d_iv = None
-        if pd.notna(rc.eff_iv) and pd.notna(rp.eff_iv):
-            d_iv = (rc.eff_iv - rp.eff_iv) * 100.0
-        judge = ""
-        if d_oi is not None and d_iv is not None and d_oi != 0:
-            judge = _QUAD[(1 if d_oi > 0 else -1, 1 if d_iv >= 0 else -1)]
+        if c_iv is not None and p_iv is not None and pd.notna(c_iv) and pd.notna(p_iv):
+            d_iv = float(c_iv - p_iv) * 100.0
+            lvl_all.append(d_iv)
+            if (pd.notna(ivc.ask_iv.get(key)) and pd.notna(ivc.bid_iv.get(key))
+                    and pd.notna(ivp.ask_iv.get(key)) and pd.notna(ivp.bid_iv.get(key))):
+                lvl_q.append(d_iv)
         rows.append({
             "option_type": key[0], "strike": int(key[1]),
             "oi": None if pd.isna(rc.oi) else float(rc.oi),
             "d_oi": d_oi,
-            "iv_pct": None if pd.isna(rc.eff_iv) else rc.eff_iv * 100.0,
+            "iv_pct": None if pd.isna(rc.eff_iv) else float(rc.eff_iv) * 100.0,
             "d_iv_pct": d_iv,
             "volume": None if pd.isna(rc.volume) else float(rc.volume),
-            "judge": judge,
         })
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    if not len(out):
+        return out, meta
+
+    pool = lvl_q if len(lvl_q) >= 5 else lvl_all
+    level = float(pd.Series(pool).median()) if pool else 0.0
+    meta["level_pct"] = level
+    meta["n_level"] = len(pool)
+    out["d_iv_ex_pct"] = out.d_iv_pct - level
+
+    def _judge(r):
+        if pd.isna(r.d_oi) or r.d_oi == 0 or pd.isna(r.d_iv_ex_pct):
+            return ""
+        if abs(r.d_iv_ex_pct) < _NEUTRAL_BAND:
+            return "中立"
+        return _QUAD[(1 if r.d_oi > 0 else -1, 1 if r.d_iv_ex_pct > 0 else -1)]
+
+    out["judge"] = out.apply(_judge, axis=1)
+    return out, meta
 
 
 def daily_atm_series(days: list[str]) -> pd.DataFrame:
