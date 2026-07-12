@@ -54,6 +54,11 @@ def _strike_intra(day_str: str, cm: str, ot: str, strikes: tuple) -> pd.DataFram
     return iv_views.strike_intraday_series(day_str, cm, ot, list(strikes))
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _strike_oi_jpx(days: tuple, cm: str, ot: str, strikes: tuple) -> pd.DataFrame:
+    return iv_views.strike_daily_oi_jpx(list(days), cm, ot, list(strikes))
+
+
 @st.cache_data(ttl=_TTL, show_spinner=False)
 def _flow(days: tuple, cm: str):
     return iv_views.flow_judgement(list(days), cm)
@@ -152,7 +157,8 @@ def main() -> None:
         od0, od1 = fmeta["oi_days"]
         iv0, iv1 = fmeta["iv_days"]
         win_txt = (f"Δ建玉 = {_fmt_d(od1)}→{_fmt_d(od0)} のOI差"
-                   f"（QRI表示値・翌取引日朝反映） / "
+                   f"（QRI表示値・翌取引日朝反映。2026-07-12以前収集分は"
+                   f"4桁以上の建玉に桁欠落の既知欠陥あり・参考値） / "
                    f"ΔIV = {_fmt_d(iv1)}→{_fmt_d(iv0)} の気配変化"
                    + ("（OIの取引日窓に整合）" if fmeta["aligned"]
                       else "（整合用データ不足のため同時点差で近似）"))
@@ -225,20 +231,25 @@ def main() -> None:
                                legend=dict(orientation="h", y=-0.25),
                                margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig5, use_container_width=True)
+        od = _strike_oi_jpx(hist_days, cm_sel, ot_sel, tuple(sorted(strikes_sel)))
+        oi_src, oi_df = ("JPX建玉残高表", od) if len(od) else ("QRI表示値", sd)
         with c2:
             fig6 = go.Figure()
             for mi, k in enumerate(sorted(strikes_sel)):
-                s = sd[sd.strike == k]
+                s = oi_df[oi_df.strike == k]
                 fig6.add_trace(go.Scatter(
                     x=s.day, y=s.oi, mode="lines+markers",
                     name=f"{k:,}",
                     line=dict(color=_COLORS[mi % len(_COLORS)], width=1.8, dash="dot")))
             fig6.update_layout(height=320, template="plotly_white",
-                               title=f"{_fmt_cm(cm_sel)} {ot_sel} 建玉残（日次）",
+                               title=f"{_fmt_cm(cm_sel)} {ot_sel} 建玉残（日次・{oi_src}）",
                                yaxis_title="枚",
                                legend=dict(orientation="h", y=-0.25),
                                margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig6, use_container_width=True)
+            if oi_src == "QRI表示値":
+                st.caption("※この限月はJPX建玉残高表（別紙1）非掲載のためQRI表示値。"
+                           "2026-07-12以前の収集分は4桁以上の建玉が下位桁欠落（既知欠陥）")
 
         intr_s = _strike_intra(day, cm_sel, ot_sel, tuple(sorted(strikes_sel)))
         if len(intr_s):

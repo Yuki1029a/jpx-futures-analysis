@@ -131,18 +131,39 @@ def smile_frame(df: pd.DataFrame, months: list[str]) -> pd.DataFrame:
     return m[["contract_month", "option_type", "strike", "iv_pct", "oi"]].sort_values("strike")
 
 
+def strike_daily_oi_jpx(days: list[str], cm: str, option_type: str,
+                        strikes: list[int]) -> pd.DataFrame:
+    """JPX建玉残高表ベースの行使価格別・日次建玉残（取引日のみ）。
+
+    QRIのoi列は2026-07-12以前の収集分に「4桁以上は先頭3桁のみ」の破損が
+    あるため、建玉はJPX公表値を正とする。別紙1に無い限月（遠い四半期限月）
+    や未公表日は行が生成されない。
+    Returns: day(date), strike, oi.
+    """
+    rows = []
+    for d in days:
+        dt = date(int(d[:4]), int(d[4:6]), int(d[6:8]))
+        jpx = _jpx_daily_oi_frame(dt, cm)
+        if jpx is None or not len(jpx):
+            continue
+        g = jpx[(jpx.option_type == option_type) & jpx.strike.isin(strikes)]
+        for _, r in g.iterrows():
+            rows.append({"day": dt, "strike": int(r.strike), "oi": r.oi})
+    return pd.DataFrame(rows)
+
+
 def strike_daily_series(days: list[str], cm: str, option_type: str,
                         strikes: list[int] | None = None) -> pd.DataFrame:
-    """Per-strike daily series (last snapshot per day) for one month x type.
+    """Per-strike daily series (16:59以前の最終スナップショット) for one month x type.
 
     Returns: day(date), strike, iv_pct(eff_iv), oi, volume.
     """
     rows = []
     for d in days:
-        keys = snapshot_keys(d)
-        if not keys:
+        key = _day_last_key_1659(d)
+        if key is None:
             continue
-        df = load_snapshot(keys[-1])
+        df = load_snapshot(key)
         if df is None or df.empty:
             continue
         m = with_eff_iv(df)
@@ -207,6 +228,20 @@ def _jpx_daily_oi_frame(trade_day: date, cm: str) -> pd.DataFrame | None:
     } for r in recs])
 
 
+def _day_last_key_1659(day_str: str) -> str | None:
+    """その日の「16:59:59以前で最後」のスナップショットキー（無ければ当日最終）。
+
+    17:00以降の夕場スナップショットは翌取引日分の値動きを含むため、
+    日次系列・IV窓の端からは除外する（取引日＝前日ナイト＋当日日中に対応）。
+    """
+    keys = snapshot_keys(day_str)
+    if not keys:
+        return None
+    pre = [k for k in keys
+           if k.rsplit("_", 1)[-1].split(".")[0] <= "165959"]
+    return pre[-1] if pre else keys[-1]
+
+
 def _is_trading_day(day_str: str) -> bool:
     """JPX建玉残高表の有無で取引日判定（休日・週末はファイルなし）。
 
@@ -248,9 +283,9 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
     """Δ建玉×ΔIV quadrant per (strike, type)。
 
     第1候補（source="jpx"）: JPX建玉残高表（当日20:00頃公表・系列別）。
-      取引日Tの増減(net change)をΔ建玉とし、ΔIVは前データ日→Tの各日最終
-      スナップショット差。取引日Tのセッション（T-1ナイト＋T日中）と窓が
-      定義から一致するため、ずらし処理は不要。
+      取引日Tの増減(net change)をΔ建玉とし、ΔIVは直前取引日→Tの
+      「各日16:59以前の最終スナップショット」差（夕場＝翌取引日分を除外）。
+      取引日Tのセッション（T-1ナイト＋T日中）と窓が定義から一致する。
     フォールバック（source="qri"）: QRIのOI欄は翌取引日朝反映のため、
       OIが実際に動いた2時点ペアを探し、IV窓を1段前へシフトして整合させる。
     地合い（サーフェス平行移動）は限月内・両気配ストライクのΔIV中央値 level
@@ -270,13 +305,13 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
         jpx = _jpx_daily_oi_frame(date(int(d[:4]), int(d[4:6]), int(d[6:8])), cm)
         if jpx is None or not len(jpx):
             continue
-        keys_cur = snapshot_keys(d)
+        key_cur = _day_last_key_1659(d)
         prv_day = next((x for x in desc[i + 1:i + 7]
                         if snapshot_keys(x) and _is_trading_day(x)), None)
-        if not keys_cur or prv_day is None:
+        if key_cur is None or prv_day is None:
             continue
-        cur_df = load_snapshot(keys_cur[-1])
-        prv_df = load_snapshot(snapshot_keys(prv_day)[-1])
+        cur_df = load_snapshot(key_cur)
+        prv_df = load_snapshot(_day_last_key_1659(prv_day))
         if cur_df is None or cur_df.empty or prv_df is None or prv_df.empty:
             continue
         ci, pi = _iv_slice(cur_df, cm), _iv_slice(prv_df, cm)
@@ -304,10 +339,10 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
     # ---- 2) フォールバック: QRIのOI欄（翌取引日朝反映）ペア方式 ----
     snaps: list[tuple[str, pd.DataFrame]] = []
     for d in desc:
-        keys = snapshot_keys(d)
-        if not keys:
+        key = _day_last_key_1659(d)
+        if key is None:
             continue
-        df = load_snapshot(keys[-1])
+        df = load_snapshot(key)
         if df is not None and not df.empty:
             snaps.append((d, df))
         if len(snaps) >= 10:
@@ -366,16 +401,16 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
 
 
 def daily_atm_series(days: list[str]) -> pd.DataFrame:
-    """Last-snapshot ATM IV / skew per month for each day.
+    """ATM IV / skew per month for each day (16:59以前の最終スナップショット).
 
     Returns columns: day (date), contract_month, atm_iv_pct, skew25_pct.
     """
     rows = []
     for d in days:
-        keys = snapshot_keys(d)
-        if not keys:
+        key = _day_last_key_1659(d)
+        if key is None:
             continue
-        df = load_snapshot(keys[-1])
+        df = load_snapshot(key)
         if df is None or df.empty:
             continue
         dt = date(int(d[:4]), int(d[4:6]), int(d[6:8]))
