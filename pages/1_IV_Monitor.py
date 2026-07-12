@@ -177,38 +177,36 @@ def main() -> None:
     # ---- Δ建玉 × 超過ΔIV 判定 ----
     if len(fl):
         fl2 = fl[fl.judge != ""].copy()
-        jc1, jc2 = st.columns([3, 2])
-        with jc1:
-            fig8 = go.Figure()
-            for jname, jcol in _JUDGE_COLORS.items():
-                s = fl2[fl2.judge == jname]
-                if not len(s):
-                    continue
-                fig8.add_trace(go.Scatter(
-                    x=s.d_oi, y=s.d_iv_ex_pct, mode="markers+text", name=jname,
-                    text=[f"{'P' if t == 'PUT' else 'C'}{k:,}"
-                          for t, k in zip(s.option_type, s.strike)],
-                    textposition="top center", textfont=dict(size=9),
-                    marker=dict(color=jcol, size=10, opacity=0.8)))
-            fig8.add_vline(x=0, line=dict(color="gray", width=0.5))
-            fig8.add_hline(y=0, line=dict(color="gray", width=0.5))
-            fig8.update_layout(height=400, template="plotly_white",
-                               title="Δ建玉 × 超過ΔIV（全ストライク）",
-                               xaxis_title="Δ建玉 (枚)",
-                               yaxis_title="超過ΔIV (%pt, 地合い控除後)",
-                               legend=dict(orientation="h", y=-0.2),
-                               margin=dict(l=0, r=0, t=30, b=0))
-            st.plotly_chart(fig8, use_container_width=True)
-        with jc2:
-            show_fl = fl2.reindex(fl2.d_oi.abs().sort_values(ascending=False).index).head(15)
-            show_fl = show_fl[["option_type", "strike", "oi", "d_oi",
-                               "iv_pct", "d_iv_pct", "d_iv_ex_pct", "judge"]]
-            show_fl.columns = ["タイプ", "行使", "建玉", "Δ建玉",
-                               "IV%", "ΔIV%pt", "超過ΔIV", "判定"]
-            show_fl["IV%"] = show_fl["IV%"].round(1)
-            show_fl["ΔIV%pt"] = show_fl["ΔIV%pt"].round(2)
-            show_fl["超過ΔIV"] = show_fl["超過ΔIV"].round(2)
-            st.dataframe(show_fl, hide_index=True, use_container_width=True, height=400)
+        fig8 = go.Figure()
+        for jname, jcol in _JUDGE_COLORS.items():
+            s = fl2[fl2.judge == jname]
+            if not len(s):
+                continue
+            fig8.add_trace(go.Scatter(
+                x=s.d_oi, y=s.d_iv_ex_pct, mode="markers+text", name=jname,
+                text=[f"{'P' if t == 'PUT' else 'C'}{k:,}"
+                      for t, k in zip(s.option_type, s.strike)],
+                textposition="top center", textfont=dict(size=9),
+                marker=dict(color=jcol, size=10, opacity=0.8)))
+        fig8.add_vline(x=0, line=dict(color="gray", width=0.5))
+        fig8.add_hline(y=0, line=dict(color="gray", width=0.5))
+        fig8.update_layout(height=420, template="plotly_white",
+                           title="Δ建玉 × 超過ΔIV（全ストライク）",
+                           xaxis_title="Δ建玉 (枚)",
+                           yaxis_title="超過ΔIV (%pt, 地合い控除後)",
+                           legend=dict(orientation="h", y=-0.2),
+                           margin=dict(l=0, r=0, t=30, b=0))
+        st.plotly_chart(fig8, use_container_width=True)
+
+        show_fl = fl2.reindex(fl2.d_oi.abs().sort_values(ascending=False).index).head(15)
+        show_fl = show_fl[["option_type", "strike", "oi", "d_oi",
+                           "iv_pct", "d_iv_pct", "d_iv_ex_pct", "judge"]]
+        show_fl.columns = ["タイプ", "行使", "建玉", "Δ建玉",
+                           "IV%", "ΔIV%pt", "超過ΔIV", "判定"]
+        show_fl["IV%"] = show_fl["IV%"].round(1)
+        show_fl["ΔIV%pt"] = show_fl["ΔIV%pt"].round(2)
+        show_fl["超過ΔIV"] = show_fl["超過ΔIV"].round(2)
+        st.dataframe(show_fl, hide_index=True, use_container_width=True, height=420)
     else:
         st.info("Δ建玉×ΔIV: 比較可能な2日分のデータがありません")
 
