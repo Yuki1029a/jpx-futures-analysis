@@ -154,19 +154,16 @@ def strike_daily_oi_jpx(days: list[str], cm: str, option_type: str,
 
 def strike_daily_series(days: list[str], cm: str, option_type: str,
                         strikes: list[int] | None = None) -> pd.DataFrame:
-    """Per-strike daily series (16:59以前の最終スナップショット) for one month x type.
+    """Per-strike daily series (16:59以前・有効IVありの最終スナップショット).
 
     Returns: day(date), strike, iv_pct(eff_iv), oi, volume.
     """
     rows = []
     for d in days:
-        key = _day_last_key_1659(d)
-        if key is None:
+        kd = _day_iv_snapshot(d, cm)
+        if kd is None or kd[1].empty:
             continue
-        df = load_snapshot(key)
-        if df is None or df.empty:
-            continue
-        m = with_eff_iv(df)
+        m = with_eff_iv(kd[1])
         g = m[(m.contract_month == cm) & (m.option_type == option_type)]
         if strikes:
             g = g[g.strike.isin(strikes)]
@@ -242,6 +239,33 @@ def _day_last_key_1659(day_str: str) -> str | None:
     return pre[-1] if pre else keys[-1]
 
 
+def _day_iv_snapshot(day_str: str, cm: str, min_rows: int = 5,
+                     max_walk: int = 6) -> tuple[str, pd.DataFrame] | None:
+    """16:59以前で「当該限月のIVが実際に入っている」最後の (key, df)。
+
+    引け後スナップショットは板クリアでIVが全欠損の日がある（例: 7/7 16:53）。
+    その場合は最大 max_walk 本さかのぼり、有効IVが min_rows 以上ある
+    スナップショットを使う。全滅なら16:59以前の最終（空でも）を返す。
+    """
+    keys = snapshot_keys(day_str)
+    if not keys:
+        return None
+    pre = [k for k in keys
+           if k.rsplit("_", 1)[-1].split(".")[0] <= "165959"] or keys
+    last: tuple[str, pd.DataFrame] | None = None
+    for k in reversed(pre[-max_walk:]):
+        df = load_snapshot(k)
+        if df is None or df.empty:
+            continue
+        if last is None:
+            last = (k, df)
+        g = with_eff_iv(df)
+        g = g[g.contract_month == cm]
+        if len(g) and int(g.eff_iv.notna().sum()) >= min_rows:
+            return k, df
+    return last
+
+
 def _is_trading_day(day_str: str) -> bool:
     """JPX建玉残高表の有無で取引日判定（休日・週末はファイルなし）。
 
@@ -262,6 +286,8 @@ def _level_judge(out: pd.DataFrame, lvl_q: list, lvl_all: list,
     """地合い（限月内・両気配ストライクのΔIV中央値）を控除し4象限判定を付与。"""
     if not len(out):
         return out, meta
+    for c in ("oi", "d_oi", "iv_pct", "d_iv_pct", "volume"):
+        out[c] = pd.to_numeric(out[c], errors="coerce")  # 全None列のobject化を防ぐ
     pool = lvl_q if len(lvl_q) >= 5 else lvl_all
     level = float(pd.Series(pool).median()) if pool else 0.0
     meta["level_pct"] = level
@@ -305,14 +331,16 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
         jpx = _jpx_daily_oi_frame(date(int(d[:4]), int(d[4:6]), int(d[6:8])), cm)
         if jpx is None or not len(jpx):
             continue
-        key_cur = _day_last_key_1659(d)
+        cur_kd = _day_iv_snapshot(d, cm)
         prv_day = next((x for x in desc[i + 1:i + 7]
                         if snapshot_keys(x) and _is_trading_day(x)), None)
-        if key_cur is None or prv_day is None:
+        if cur_kd is None or prv_day is None:
             continue
-        cur_df = load_snapshot(key_cur)
-        prv_df = load_snapshot(_day_last_key_1659(prv_day))
-        if cur_df is None or cur_df.empty or prv_df is None or prv_df.empty:
+        prv_kd = _day_iv_snapshot(prv_day, cm)
+        if prv_kd is None:
+            continue
+        cur_df, prv_df = cur_kd[1], prv_kd[1]
+        if cur_df.empty or prv_df.empty:
             continue
         ci, pi = _iv_slice(cur_df, cm), _iv_slice(prv_df, cm)
         rows, lvl_q, lvl_all = [], [], []
@@ -339,12 +367,10 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
     # ---- 2) フォールバック: QRIのOI欄（翌取引日朝反映）ペア方式 ----
     snaps: list[tuple[str, pd.DataFrame]] = []
     for d in desc:
-        key = _day_last_key_1659(d)
-        if key is None:
+        kd = _day_iv_snapshot(d, cm)
+        if kd is None or kd[1].empty:
             continue
-        df = load_snapshot(key)
-        if df is not None and not df.empty:
-            snaps.append((d, df))
+        snaps.append((d, kd[1]))
         if len(snaps) >= 10:
             break
     if len(snaps) < 2:
