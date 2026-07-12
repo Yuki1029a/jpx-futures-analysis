@@ -181,44 +181,141 @@ _QUAD = {(1, 1): "新規買い", (1, -1): "新規売り", (-1, 1): "買い戻し
 _NEUTRAL_BAND = 0.05  # %pt: |超過ΔIV| がこれ未満は方向を断定しない
 
 
-def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
-    """Δ建玉×ΔIV quadrant per (strike, type), IV窓をOIの取引日窓に整合させる。
+def _iv_slice(df: pd.DataFrame, cm: str) -> pd.DataFrame:
+    """1スナップショットを (option_type, strike[int]) index に整形（eff_iv付与）。"""
+    g = with_eff_iv(df)
+    g = g[g.contract_month == cm]
+    g = g[~g.duplicated(subset=["option_type", "strike"])].copy()
+    g["strike"] = g["strike"].astype(int)
+    return g.set_index(["option_type", "strike"])
 
-    QRIのoiはJPX清算後残高のT+1反映のため、データ日 d の最終スナップショットの
-    OIは「dより前の直近取引日」引け残。各日最終スナップを新しい順に snaps とし、
-      k  = OIが snaps[0] から最初に動いたデータ日 index
-      k2 = snaps[k] からさらに動いた index
-    とすると Δ建玉 = OI[0]−OI[k] は取引日窓 (day[k2], day[k]] の売買を反映する。
-    同じ取引日窓の気配変化は ΔIV = eff_iv[k]−eff_iv[k2]（1データ日前へシフト）。
-    地合い（サーフェス平行移動）は限月内・両気配ストライクのΔIV中央値 level で
-    控除し、超過ΔIV = ΔIV−level の符号で判定する。
+
+def _jpx_daily_oi_frame(trade_day: date, cm: str) -> pd.DataFrame | None:
+    """JPX建玉残高表（当日20:00頃公表・系列別）の1限月分。未公表・休日はNone。"""
+    from data.aggregator import _load_daily_oi_for_date
+    try:
+        recs = _load_daily_oi_for_date(trade_day, cm)
+    except Exception as e:
+        logger.warning("JPX daily OI load failed for %s: %s", trade_day, e)
+        return None
+    if not recs:
+        return None
+    return pd.DataFrame([{
+        "option_type": r.option_type, "strike": int(r.strike_price),
+        "oi": float(r.current_oi), "d_oi": float(r.net_change),
+        "volume": float(r.trading_volume),
+    } for r in recs])
+
+
+def _is_trading_day(day_str: str) -> bool:
+    """JPX建玉残高表の有無で取引日判定（休日・週末はファイルなし）。
+
+    IV窓の起点を直前「取引日」の最終スナップショットに限定するために使う。
+    週末スナップショット（ナイトセッション終了後の静止気配）を起点にすると
+    金曜ナイト分の変動が窓から漏れるため。
+    """
+    from data import fetcher
+    try:
+        return fetcher.download_daily_oi_excel(
+            date(int(day_str[:4]), int(day_str[4:6]), int(day_str[6:8]))) is not None
+    except Exception:
+        return False
+
+
+def _level_judge(out: pd.DataFrame, lvl_q: list, lvl_all: list,
+                 meta: dict) -> tuple[pd.DataFrame, dict]:
+    """地合い（限月内・両気配ストライクのΔIV中央値）を控除し4象限判定を付与。"""
+    if not len(out):
+        return out, meta
+    pool = lvl_q if len(lvl_q) >= 5 else lvl_all
+    level = float(pd.Series(pool).median()) if pool else 0.0
+    meta["level_pct"] = level
+    meta["n_level"] = len(pool)
+    out["d_iv_ex_pct"] = out.d_iv_pct - level
+
+    def _judge(r):
+        if pd.isna(r.d_oi) or r.d_oi == 0 or pd.isna(r.d_iv_ex_pct):
+            return ""
+        if abs(r.d_iv_ex_pct) < _NEUTRAL_BAND:
+            return "中立"
+        return _QUAD[(1 if r.d_oi > 0 else -1, 1 if r.d_iv_ex_pct > 0 else -1)]
+
+    out["judge"] = out.apply(_judge, axis=1)
+    return out, meta
+
+
+def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
+    """Δ建玉×ΔIV quadrant per (strike, type)。
+
+    第1候補（source="jpx"）: JPX建玉残高表（当日20:00頃公表・系列別）。
+      取引日Tの増減(net change)をΔ建玉とし、ΔIVは前データ日→Tの各日最終
+      スナップショット差。取引日Tのセッション（T-1ナイト＋T日中）と窓が
+      定義から一致するため、ずらし処理は不要。
+    フォールバック（source="qri"）: QRIのOI欄は翌取引日朝反映のため、
+      OIが実際に動いた2時点ペアを探し、IV窓を1段前へシフトして整合させる。
+    地合い（サーフェス平行移動）は限月内・両気配ストライクのΔIV中央値 level
+    で控除し、超過ΔIV = ΔIV−level の符号で判定する。
     Returns (df, meta):
       df   : option_type, strike, oi, d_oi, iv_pct, d_iv_pct, d_iv_ex_pct,
              volume, judge
-      meta : oi_days=(当日,比較日), iv_days=(IV当日,IV比較日),
-             level_pct, n_level, aligned(bool: IV窓シフト成立)
+      meta : source("jpx"/"qri"/None), trade_day(jpx時), oi_days(qri時),
+             iv_days, level_pct, n_level, aligned
     """
+    meta = {"source": None, "trade_day": None, "oi_days": None, "iv_days": None,
+            "level_pct": 0.0, "n_level": 0, "aligned": True}
+    desc = [d for d in reversed(days)]
+
+    # ---- 1) JPX建玉残高表（当日分・系列別） ----
+    for i, d in enumerate(desc[:6]):
+        jpx = _jpx_daily_oi_frame(date(int(d[:4]), int(d[4:6]), int(d[6:8])), cm)
+        if jpx is None or not len(jpx):
+            continue
+        keys_cur = snapshot_keys(d)
+        prv_day = next((x for x in desc[i + 1:i + 7]
+                        if snapshot_keys(x) and _is_trading_day(x)), None)
+        if not keys_cur or prv_day is None:
+            continue
+        cur_df = load_snapshot(keys_cur[-1])
+        prv_df = load_snapshot(snapshot_keys(prv_day)[-1])
+        if cur_df is None or cur_df.empty or prv_df is None or prv_df.empty:
+            continue
+        ci, pi = _iv_slice(cur_df, cm), _iv_slice(prv_df, cm)
+        rows, lvl_q, lvl_all = [], [], []
+        for _, r in jpx.iterrows():
+            key = (r.option_type, int(r.strike))
+            cv, pv = ci.eff_iv.get(key), pi.eff_iv.get(key)
+            d_iv = None
+            if cv is not None and pv is not None and pd.notna(cv) and pd.notna(pv):
+                d_iv = float(cv - pv) * 100.0
+                lvl_all.append(d_iv)
+                if (pd.notna(ci.ask_iv.get(key)) and pd.notna(ci.bid_iv.get(key))
+                        and pd.notna(pi.ask_iv.get(key)) and pd.notna(pi.bid_iv.get(key))):
+                    lvl_q.append(d_iv)
+            rows.append({
+                "option_type": r.option_type, "strike": int(r.strike),
+                "oi": r.oi, "d_oi": r.d_oi,
+                "iv_pct": None if cv is None or pd.isna(cv) else float(cv) * 100.0,
+                "d_iv_pct": d_iv,
+                "volume": r.volume,
+            })
+        meta.update(source="jpx", trade_day=d, iv_days=(d, prv_day))
+        return _level_judge(pd.DataFrame(rows), lvl_q, lvl_all, meta)
+
+    # ---- 2) フォールバック: QRIのOI欄（翌取引日朝反映）ペア方式 ----
     snaps: list[tuple[str, pd.DataFrame]] = []
-    for d in reversed(days):
+    for d in desc:
         keys = snapshot_keys(d)
         if not keys:
             continue
         df = load_snapshot(keys[-1])
         if df is not None and not df.empty:
-            snaps.append((d, with_eff_iv(df)))
+            snaps.append((d, df))
         if len(snaps) >= 10:
             break
-    meta = {"oi_days": None, "iv_days": None,
-            "level_pct": 0.0, "n_level": 0, "aligned": True}
     if len(snaps) < 2:
         return pd.DataFrame(), meta
 
-    def _slice(df):
-        g = df[df.contract_month == cm]
-        g = g[~g.duplicated(subset=["option_type", "strike"])]
-        return g.set_index(["option_type", "strike"])
-
-    sl = [(d, _slice(df)) for d, df in snaps]
+    sl = [(d, _iv_slice(df, cm)) for d, df in snaps]
 
     def _oi_moved(a, b):
         common = a.index.intersection(b.index)
@@ -238,12 +335,11 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
 
     cur, prv = sl[0][1], sl[k][1]
     ivc, ivp = sl[ivc_i][1], sl[ivp_i][1]
-    meta["oi_days"] = (sl[0][0], sl[k][0])
-    meta["iv_days"] = (sl[ivc_i][0], sl[ivp_i][0])
+    meta.update(source="qri", oi_days=(sl[0][0], sl[k][0]),
+                iv_days=(sl[ivc_i][0], sl[ivp_i][0]))
 
     idx = cur.index.intersection(prv.index)
-    rows = []
-    lvl_q, lvl_all = [], []
+    rows, lvl_q, lvl_all = [], [], []
     for key in idx:
         rc, rp = cur.loc[key], prv.loc[key]
         d_oi = None
@@ -266,25 +362,7 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
             "d_iv_pct": d_iv,
             "volume": None if pd.isna(rc.volume) else float(rc.volume),
         })
-    out = pd.DataFrame(rows)
-    if not len(out):
-        return out, meta
-
-    pool = lvl_q if len(lvl_q) >= 5 else lvl_all
-    level = float(pd.Series(pool).median()) if pool else 0.0
-    meta["level_pct"] = level
-    meta["n_level"] = len(pool)
-    out["d_iv_ex_pct"] = out.d_iv_pct - level
-
-    def _judge(r):
-        if pd.isna(r.d_oi) or r.d_oi == 0 or pd.isna(r.d_iv_ex_pct):
-            return ""
-        if abs(r.d_iv_ex_pct) < _NEUTRAL_BAND:
-            return "中立"
-        return _QUAD[(1 if r.d_oi > 0 else -1, 1 if r.d_iv_ex_pct > 0 else -1)]
-
-    out["judge"] = out.apply(_judge, axis=1)
-    return out, meta
+    return _level_judge(pd.DataFrame(rows), lvl_q, lvl_all, meta)
 
 
 def daily_atm_series(days: list[str]) -> pd.DataFrame:

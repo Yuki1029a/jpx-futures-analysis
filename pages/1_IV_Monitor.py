@@ -143,13 +143,22 @@ def main() -> None:
     atm_txt = "-"
     if len(srow) and pd.notna(srow.iloc[0].atm_iv):
         atm_txt = f"ATM {srow.iloc[0].atm_strike:,.0f} / {srow.iloc[0].atm_iv * 100:.1f}%"
-    if fmeta["oi_days"]:
+    if fmeta.get("source") == "jpx":
+        iv0, iv1 = fmeta["iv_days"]
+        win_txt = (f"対象取引日: {_fmt_d(fmeta['trade_day'])}"
+                   f"（Δ建玉 = JPX建玉残高表〔当日20:00頃公表〕の増減 / "
+                   f"ΔIV = {_fmt_d(iv1)}→{_fmt_d(iv0)} 最終気配の変化）")
+    elif fmeta.get("source") == "qri":
         od0, od1 = fmeta["oi_days"]
         iv0, iv1 = fmeta["iv_days"]
-        win_txt = (f"Δ建玉 = {_fmt_d(od1)}→{_fmt_d(od0)} のOI差 / "
+        win_txt = (f"Δ建玉 = {_fmt_d(od1)}→{_fmt_d(od0)} のOI差"
+                   f"（QRI表示値・翌取引日朝反映） / "
                    f"ΔIV = {_fmt_d(iv1)}→{_fmt_d(iv0)} の気配変化"
                    + ("（OIの取引日窓に整合）" if fmeta["aligned"]
                       else "（整合用データ不足のため同時点差で近似）"))
+    else:
+        win_txt = ""
+    if win_txt:
         lvl_txt = f"地合い（限月内ΔIV中央値）: {fmeta['level_pct']:+.2f}%pt（n={fmeta['n_level']}）"
         st.caption(f"{atm_txt}  |  {lvl_txt}  |  {win_txt}")
     else:
