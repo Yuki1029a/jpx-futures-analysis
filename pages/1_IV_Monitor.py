@@ -110,6 +110,7 @@ def main() -> None:
                f"ソース更新: {upd.iloc[0] if len(upd) else '-'}  |  行数: {len(df):,}")
 
     all_months = sorted(df.contract_month.unique())
+    days_sel = [d for d in days if d <= day]  # 選択日をアンカーに過去方向のみ使用
 
     # ---------------- フロー判定（主機能） ----------------
     st.subheader("行使価格別 IV×建玉（買われたか・売られたか）")
@@ -120,7 +121,7 @@ def main() -> None:
     with sc2:
         ot_sel = st.radio("タイプ", ["PUT", "CALL"], horizontal=True, key="ps_ot")
 
-    fl, fmeta = _flow(tuple(days), cm_sel)
+    fl, fmeta = _flow(tuple(days_sel), cm_sel)
 
     g_now = df[(df.contract_month == cm_sel) & (df.option_type == ot_sel)].copy()
     g_now = g_now[g_now.oi.notna()]
@@ -139,7 +140,7 @@ def main() -> None:
         strikes_sel = st.multiselect(
             "行使価格（既定=Δ建玉上位5本）", strike_opts,
             default=sorted(default_strikes),
-            key=f"ps_strikes_{cm_sel}_{ot_sel}",
+            key=f"ps_strikes_{day}_{cm_sel}_{ot_sel}",
             format_func=lambda x: f"{x:,}")
 
     # 文脈情報: ATM・地合い・観測窓
@@ -198,7 +199,10 @@ def main() -> None:
                            margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig8, use_container_width=True)
 
-        show_fl = fl2.reindex(fl2.d_oi.abs().sort_values(ascending=False).index).head(15)
+        # テーブルはΔ建玉が動いた全系列が母集団（IV欠損=判定不能も含める）
+        tbl = fl[fl.d_oi.notna() & (fl.d_oi != 0)].copy()
+        tbl["judge"] = tbl.judge.where(tbl.judge != "", "判定不能(IV欠損)")
+        show_fl = tbl.reindex(tbl.d_oi.abs().sort_values(ascending=False).index).head(15)
         show_fl = show_fl[["option_type", "strike", "oi", "d_oi",
                            "iv_pct", "d_iv_pct", "d_iv_ex_pct", "judge"]]
         show_fl.columns = ["タイプ", "行使", "建玉", "Δ建玉",
@@ -212,7 +216,7 @@ def main() -> None:
 
     # ---- 選択行使の時系列 ----
     if strikes_sel:
-        hist_days = tuple(days[-n_hist:])
+        hist_days = tuple(days_sel[-n_hist:])
         sd = _strike_daily(hist_days, cm_sel, ot_sel, tuple(sorted(strikes_sel)))
         c1, c2 = st.columns(2)
         with c1:
@@ -291,7 +295,7 @@ def main() -> None:
                    "特定行使の局所的な盛り上がり・凹みはフロー集中の痕跡")
 
     with st.expander("ATM IV 日次推移（全限月）"):
-        hist = _daily(tuple(days[-n_hist:]))
+        hist = _daily(tuple(days_sel[-n_hist:]))
         if len(hist):
             fig3 = go.Figure()
             for mi, cm in enumerate(sorted(hist.contract_month.unique())):
