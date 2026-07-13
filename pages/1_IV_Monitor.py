@@ -278,6 +278,13 @@ def main() -> None:
                            "2026-07-12以前の収集分は4桁以上の建玉が下位桁欠落（既知欠陥）")
 
         intr_s = _strike_intra(tuple(days_sel), intra_n, cm_sel, ot_sel, ck)
+        if len(intr_s) and "ts" not in intr_s.columns:
+            # 再デプロイ過渡期の旧モジュール/旧キャッシュ互換: day+time からtsを復元
+            intr_s = intr_s.copy()
+            intr_s["ts"] = pd.to_datetime(
+                intr_s.day.str.slice(0, 4) + "-" + intr_s.day.str.slice(4, 6)
+                + "-" + intr_s.day.str.slice(6, 8) + " "
+                + intr_s.time.str.split(" ").str[-1])
         if len(intr_s):
             fig7 = go.Figure()
             for mi, k in enumerate(chart_strikes):
