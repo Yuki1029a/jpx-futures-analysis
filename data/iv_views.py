@@ -178,20 +178,37 @@ def strike_daily_series(days: list[str], cm: str, option_type: str,
     return pd.DataFrame(rows)
 
 
-def strike_intraday_series(day_str: str, cm: str, option_type: str,
+def strike_intraday_series(days: list[str], n_days: int, cm: str, option_type: str,
                            strikes: list[int]) -> pd.DataFrame:
-    """Per-strike IV across all snapshots of one day. Returns: time, strike, iv_pct."""
+    """直近n取引日の全スナップショット横断の行使別IV・累積出来高。
+
+    days（昇順、末尾=アンカー日）から取引日を n_days 日選ぶ（アンカー日は
+    JPXファイル未公表の当日でも常に含める）。volume はQRI表示の累積出来高
+    （取引日ごとにリセット）。
+    Returns: time("M/D HH:MM"), day, strike, iv_pct, volume.
+    """
+    if not days:
+        return pd.DataFrame()
+    anchor = days[-1]
+    tdays = [d for d in days if d == anchor or _is_trading_day(d)][-n_days:]
     rows = []
-    for key in snapshot_keys(day_str):
-        df = load_snapshot(key)
-        if df is None or df.empty:
-            continue
-        m = with_eff_iv(df)
-        g = m[(m.contract_month == cm) & (m.option_type == option_type) & m.strike.isin(strikes)]
-        tl = key_time_label(key)
-        for _, r in g.iterrows():
-            if pd.notna(r.eff_iv):
-                rows.append({"time": tl, "strike": int(r.strike), "iv_pct": r.eff_iv * 100.0})
+    for d in tdays:
+        for key in snapshot_keys(d):
+            df = load_snapshot(key)
+            if df is None or df.empty:
+                continue
+            m = with_eff_iv(df)
+            g = m[(m.contract_month == cm) & (m.option_type == option_type)
+                  & m.strike.isin(strikes)]
+            tl = f"{int(d[4:6])}/{int(d[6:8])} {key_time_label(key)[:5]}"
+            for _, r in g.iterrows():
+                if pd.isna(r.eff_iv) and pd.isna(r.volume):
+                    continue
+                rows.append({
+                    "time": tl, "day": d, "strike": int(r.strike),
+                    "iv_pct": None if pd.isna(r.eff_iv) else r.eff_iv * 100.0,
+                    "volume": None if pd.isna(r.volume) else float(r.volume),
+                })
     return pd.DataFrame(rows)
 
 

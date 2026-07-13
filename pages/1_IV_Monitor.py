@@ -50,8 +50,8 @@ def _strike_daily(days: tuple, cm: str, ot: str, strikes: tuple) -> pd.DataFrame
 
 
 @st.cache_data(ttl=_TTL, show_spinner=False)
-def _strike_intra(day_str: str, cm: str, ot: str, strikes: tuple) -> pd.DataFrame:
-    return iv_views.strike_intraday_series(day_str, cm, ot, list(strikes))
+def _strike_intra(days: tuple, n_days: int, cm: str, ot: str, strikes: tuple) -> pd.DataFrame:
+    return iv_views.strike_intraday_series(list(days), n_days, cm, ot, list(strikes))
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -104,6 +104,7 @@ def main() -> None:
         n_hist = st.sidebar.slider("日次チャートの日数", 5, len(days), min(20, len(days)))
     else:
         n_hist = len(days)
+    intra_n = st.sidebar.slider("日内チャートの日数", 1, 5, 3)
 
     upd = df.source_update_time.dropna()
     st.caption(f"最終スナップショット: {iv_views.key_time_label(key)}  |  "
@@ -136,12 +137,34 @@ def main() -> None:
     if not default_strikes:
         default_strikes = sorted(
             g_now.sort_values("oi", ascending=False).head(5).strike.astype(int).tolist())
+
     with sc3:
+        sel_mode = st.radio("行使の選び方", ["Δ建玉上位5", "範囲指定", "個別指定"],
+                            horizontal=True, key="ps_mode")
+    if sel_mode == "範囲指定" and strike_opts:
+        lo0 = min(default_strikes) if default_strikes else strike_opts[len(strike_opts) // 3]
+        hi0 = max(default_strikes) if default_strikes else strike_opts[2 * len(strike_opts) // 3]
+        lo, hi = st.select_slider(
+            "行使価格の範囲", options=strike_opts, value=(lo0, hi0),
+            key=f"ps_range_{cm_sel}_{ot_sel}", format_func=lambda x: f"{x:,}")
+        strikes_sel = [k for k in strike_opts if lo <= k <= hi]
+    elif sel_mode == "個別指定":
         strikes_sel = st.multiselect(
-            "行使価格（既定=Δ建玉上位5本）", strike_opts,
-            default=sorted(default_strikes),
+            "行使価格", strike_opts, default=sorted(default_strikes),
             key=f"ps_strikes_{day}_{cm_sel}_{ot_sel}",
             format_func=lambda x: f"{x:,}")
+    else:
+        strikes_sel = sorted(default_strikes)
+        if strikes_sel:
+            st.caption("対象行使: " + " / ".join(f"{k:,}" for k in strikes_sel))
+
+    # チャートは線が多すぎると判読不能になるため上限16本（建玉上位を優先）
+    chart_strikes = sorted(strikes_sel)
+    if len(chart_strikes) > 16:
+        top_oi = g_now[g_now.strike.isin(chart_strikes)].sort_values("oi", ascending=False)
+        chart_strikes = sorted(top_oi.head(16).strike.astype(int).tolist())
+        st.caption(f"※チャートは選択{len(strikes_sel)}本のうち建玉上位16本のみ描画"
+                   "（生データ表は全選択行使を表示）")
 
     # 文脈情報: ATM・地合い・観測窓
     summ = iv_views.month_summary(df)
@@ -203,9 +226,9 @@ def main() -> None:
         tbl = fl[fl.d_oi.notna() & (fl.d_oi != 0)].copy()
         tbl["judge"] = tbl.judge.where(tbl.judge != "", "判定不能(IV欠損)")
         show_fl = tbl.reindex(tbl.d_oi.abs().sort_values(ascending=False).index).head(15)
-        show_fl = show_fl[["option_type", "strike", "oi", "d_oi",
+        show_fl = show_fl[["option_type", "strike", "oi", "d_oi", "volume",
                            "iv_pct", "d_iv_pct", "d_iv_ex_pct", "judge"]]
-        show_fl.columns = ["タイプ", "行使", "建玉", "Δ建玉",
+        show_fl.columns = ["タイプ", "行使", "建玉", "Δ建玉", "出来高",
                            "IV%", "ΔIV%pt", "超過ΔIV", "判定"]
         show_fl["IV%"] = show_fl["IV%"].round(1)
         show_fl["ΔIV%pt"] = show_fl["ΔIV%pt"].round(2)
@@ -217,11 +240,12 @@ def main() -> None:
     # ---- 選択行使の時系列 ----
     if strikes_sel:
         hist_days = tuple(days_sel[-n_hist:])
-        sd = _strike_daily(hist_days, cm_sel, ot_sel, tuple(sorted(strikes_sel)))
+        ck = tuple(chart_strikes)
+        sd = _strike_daily(hist_days, cm_sel, ot_sel, ck)
         c1, c2 = st.columns(2)
         with c1:
             fig5 = go.Figure()
-            for mi, k in enumerate(sorted(strikes_sel)):
+            for mi, k in enumerate(chart_strikes):
                 s = sd[sd.strike == k]
                 fig5.add_trace(go.Scatter(
                     x=s.day, y=s.iv_pct, mode="lines+markers",
@@ -233,11 +257,11 @@ def main() -> None:
                                legend=dict(orientation="h", y=-0.25),
                                margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig5, use_container_width=True)
-        od = _strike_oi_jpx(hist_days, cm_sel, ot_sel, tuple(sorted(strikes_sel)))
+        od = _strike_oi_jpx(hist_days, cm_sel, ot_sel, ck)
         oi_src, oi_df = ("JPX建玉残高表", od) if len(od) else ("QRI表示値", sd)
         with c2:
             fig6 = go.Figure()
-            for mi, k in enumerate(sorted(strikes_sel)):
+            for mi, k in enumerate(chart_strikes):
                 s = oi_df[oi_df.strike == k]
                 fig6.add_trace(go.Scatter(
                     x=s.day, y=s.oi, mode="lines+markers",
@@ -253,22 +277,43 @@ def main() -> None:
                 st.caption("※この限月はJPX建玉残高表（別紙1）非掲載のためQRI表示値。"
                            "2026-07-12以前の収集分は4桁以上の建玉が下位桁欠落（既知欠陥）")
 
-        intr_s = _strike_intra(day, cm_sel, ot_sel, tuple(sorted(strikes_sel)))
+        intr_s = _strike_intra(tuple(days_sel), intra_n, cm_sel, ot_sel, ck)
         if len(intr_s):
+            times = list(dict.fromkeys(intr_s.time))  # 出現順を保持
             fig7 = go.Figure()
-            for mi, k in enumerate(sorted(strikes_sel)):
+            for mi, k in enumerate(chart_strikes):
                 s = intr_s[intr_s.strike == k]
                 fig7.add_trace(go.Scatter(
                     x=s.time, y=s.iv_pct, mode="lines+markers",
                     name=f"{k:,}",
                     line=dict(color=_COLORS[mi % len(_COLORS)], width=1.6)))
-            fig7.update_layout(height=280, template="plotly_white",
-                               title=f"{_fmt_cm(cm_sel)} {ot_sel} IV 日内"
-                                     f"（{day[:4]}/{day[4:6]}/{day[6:8]}）",
+            fig7.update_layout(height=300, template="plotly_white",
+                               title=f"{_fmt_cm(cm_sel)} {ot_sel} IV 日内（直近{intra_n}取引日）",
                                yaxis_title="IV (%)",
-                               legend=dict(orientation="h", y=-0.3),
+                               xaxis=dict(type="category",
+                                          categoryorder="array", categoryarray=times,
+                                          tickangle=-45, nticks=14),
+                               legend=dict(orientation="h", y=-0.45),
                                margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig7, use_container_width=True)
+
+            fig9 = go.Figure()
+            for mi, k in enumerate(chart_strikes):
+                s = intr_s[intr_s.strike == k]
+                fig9.add_trace(go.Scatter(
+                    x=s.time, y=s.volume, mode="lines+markers",
+                    name=f"{k:,}",
+                    line=dict(color=_COLORS[mi % len(_COLORS)], width=1.4, dash="dot")))
+            fig9.update_layout(height=240, template="plotly_white",
+                               title=f"{_fmt_cm(cm_sel)} {ot_sel} 出来高 日内"
+                                     "（累積・取引日ごとにリセット）",
+                               yaxis_title="枚",
+                               xaxis=dict(type="category",
+                                          categoryorder="array", categoryarray=times,
+                                          tickangle=-45, nticks=14),
+                               legend=dict(orientation="h", y=-0.55),
+                               margin=dict(l=0, r=0, t=30, b=0))
+            st.plotly_chart(fig9, use_container_width=True)
 
     # ---------------- 補助情報（expander） ----------------
     with st.expander("IVスマイル（選択限月・最終スナップショット）"):
@@ -313,7 +358,11 @@ def main() -> None:
             st.info("日次データなし")
 
     with st.expander("スナップショット生データ（選択限月）"):
+        only_sel = st.checkbox("選択した行使価格のみ", value=True, key="raw_only_sel")
         show = df[df.contract_month == cm_sel].copy()
+        if only_sel and strikes_sel:
+            show = show[show.strike.astype(int).isin(strikes_sel)]
+        show = show.sort_values(["option_type", "strike"])
         for c in ("iv", "ask_iv", "bid_iv"):
             show[c] = (show[c] * 100).round(2)
         st.dataframe(show, use_container_width=True, height=420)
