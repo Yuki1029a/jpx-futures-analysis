@@ -208,11 +208,12 @@ def strike_intraday_series(days: list[str], n_days: int, cm: str, option_type: s
             g = m[(m.contract_month == cm) & (m.option_type == option_type)
                   & m.strike.isin(strikes)]
             tl = f"{int(d[4:6])}/{int(d[6:8])} {key_time_label(key)[:5]}"
+            ts = pd.Timestamp(f"{d[:4]}-{d[4:6]}-{d[6:8]} {key_time_label(key)}")
             for _, r in g.iterrows():
                 if pd.isna(r.eff_iv) and pd.isna(r.volume):
                     continue
                 rows.append({
-                    "time": tl, "day": d, "strike": int(r.strike),
+                    "time": tl, "ts": ts, "day": d, "strike": int(r.strike),
                     "iv_pct": None if pd.isna(r.eff_iv) else r.eff_iv * 100.0,
                     "volume": None if pd.isna(r.volume) else float(r.volume),
                 })

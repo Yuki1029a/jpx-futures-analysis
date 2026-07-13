@@ -279,13 +279,12 @@ def main() -> None:
 
         intr_s = _strike_intra(tuple(days_sel), intra_n, cm_sel, ot_sel, ck)
         if len(intr_s):
-            times = list(dict.fromkeys(intr_s.time))  # 出現順を保持
             fig7 = go.Figure()
             for mi, k in enumerate(chart_strikes):
                 s = intr_s[intr_s.strike == k]
                 col = _COLORS[mi % len(_COLORS)]
                 fig7.add_trace(go.Scatter(
-                    x=s.time, y=s.iv_pct, mode="lines+markers",
+                    x=s.ts, y=s.iv_pct, mode="lines+markers",
                     name=f"{k:,}", line=dict(color=col, width=1.6)))
                 # 出来高はスナップショット間の増分（取引日切替のリセット時は当該値）
                 dv = s.volume.diff()
@@ -293,8 +292,14 @@ def main() -> None:
                 if len(dv):
                     dv.iloc[0] = s.volume.iloc[0]
                 fig7.add_trace(go.Bar(
-                    x=s.time, y=dv, name=f"{k:,} 出来高",
+                    x=s.ts, y=dv, name=f"{k:,} 出来高", width=8 * 60 * 1000,
                     marker_color=col, opacity=0.35, yaxis="y2", showlegend=False))
+            # 取引のない時間帯を詰める（昼: 6:00-8:45 / 夕: 15:45-17:00 / 週末）
+            breaks = [dict(bounds=[6, 8.75], pattern="hour"),
+                      dict(bounds=[15.75, 17], pattern="hour")]
+            if all(pd.Timestamp(f"{d[:4]}-{d[4:6]}-{d[6:8]}").weekday() < 5
+                   for d in intr_s.day.unique()):
+                breaks.append(dict(bounds=["sat", "mon"]))
             fig7.update_layout(height=380, template="plotly_white",
                                title=f"{_fmt_cm(cm_sel)} {ot_sel} IV 日内（直近{intra_n}取引日）"
                                      "　棒=出来高（スナップショット間増分・右軸）",
@@ -302,10 +307,9 @@ def main() -> None:
                                yaxis2=dict(title="出来高 (枚)", overlaying="y",
                                            side="right", showgrid=False,
                                            rangemode="tozero"),
-                               barmode="group",
-                               xaxis=dict(type="category",
-                                          categoryorder="array", categoryarray=times,
-                                          tickangle=-45, nticks=14),
+                               barmode="overlay",
+                               xaxis=dict(type="date", tickformat="%m/%d %H:%M",
+                                          tickangle=-45, rangebreaks=breaks),
                                legend=dict(orientation="h", y=-0.45),
                                margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig7, use_container_width=True)
