@@ -67,10 +67,17 @@ def key_time_label(key: str) -> str:
 # 両気配欠損時のみ 'iv'」の eff_iv で計算する。
 
 def with_eff_iv(df: pd.DataFrame) -> pd.DataFrame:
-    """Add eff_iv = mid(ask_iv, bid_iv) when both quoted, else traded/settle iv."""
+    """Add eff_iv = mid(ask_iv, bid_iv) when both quoted, else traded/settle iv.
+
+    全行欠損の列はparquetでnull型→pandasでobject dtypeになり算術がTypeError
+    になるため、参照する数値列はここで一括して強制float化する。
+    """
     m = df.copy()
-    mid = (m.ask_iv + m.bid_iv) / 2.0
-    m["eff_iv"] = mid.where(m.ask_iv.notna() & m.bid_iv.notna(), m["iv"])
+    for c in ("ask_iv", "bid_iv", "iv", "oi", "volume"):
+        if c in m.columns:
+            m[c] = pd.to_numeric(m[c], errors="coerce")
+    m["eff_iv"] = ((m.ask_iv + m.bid_iv) / 2.0).where(
+        m.ask_iv.notna() & m.bid_iv.notna(), m["iv"])
     return m
 
 
