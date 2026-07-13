@@ -299,7 +299,7 @@ def main() -> None:
                 if len(dv):
                     dv.iloc[0] = s.volume.iloc[0]
                 fig7.add_trace(go.Bar(
-                    x=s.ts, y=dv, name=f"{k:,} 出来高", width=8 * 60 * 1000,
+                    x=s.ts, y=dv, name=f"{k:,} 出来高", width=20 * 60 * 1000,
                     marker_color=col, opacity=0.35, yaxis="y2", showlegend=False))
             # 取引のない時間帯を詰める（昼: 6:00-8:45 / 夕: 15:45-17:00 / 週末）
             breaks = [dict(bounds=[6, 8.75], pattern="hour"),
@@ -316,6 +316,7 @@ def main() -> None:
                                            rangemode="tozero"),
                                barmode="overlay",
                                xaxis=dict(type="date", tickformat="%m/%d %H:%M",
+                                          dtick=3 * 60 * 60 * 1000,  # 3時間刻み
                                           tickangle=-45, rangebreaks=breaks),
                                legend=dict(orientation="h", y=-0.45),
                                margin=dict(l=0, r=0, t=30, b=0))
