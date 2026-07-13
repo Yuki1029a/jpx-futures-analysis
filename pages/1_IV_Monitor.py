@@ -283,37 +283,32 @@ def main() -> None:
             fig7 = go.Figure()
             for mi, k in enumerate(chart_strikes):
                 s = intr_s[intr_s.strike == k]
+                col = _COLORS[mi % len(_COLORS)]
                 fig7.add_trace(go.Scatter(
                     x=s.time, y=s.iv_pct, mode="lines+markers",
-                    name=f"{k:,}",
-                    line=dict(color=_COLORS[mi % len(_COLORS)], width=1.6)))
-            fig7.update_layout(height=300, template="plotly_white",
-                               title=f"{_fmt_cm(cm_sel)} {ot_sel} IV 日内（直近{intra_n}取引日）",
-                               yaxis_title="IV (%)",
+                    name=f"{k:,}", line=dict(color=col, width=1.6)))
+                # 出来高はスナップショット間の増分（取引日切替のリセット時は当該値）
+                dv = s.volume.diff()
+                dv = dv.where(dv >= 0, s.volume)
+                if len(dv):
+                    dv.iloc[0] = s.volume.iloc[0]
+                fig7.add_trace(go.Bar(
+                    x=s.time, y=dv, name=f"{k:,} 出来高",
+                    marker_color=col, opacity=0.35, yaxis="y2", showlegend=False))
+            fig7.update_layout(height=380, template="plotly_white",
+                               title=f"{_fmt_cm(cm_sel)} {ot_sel} IV 日内（直近{intra_n}取引日）"
+                                     "　棒=出来高（スナップショット間増分・右軸）",
+                               yaxis=dict(title="IV (%)"),
+                               yaxis2=dict(title="出来高 (枚)", overlaying="y",
+                                           side="right", showgrid=False,
+                                           rangemode="tozero"),
+                               barmode="group",
                                xaxis=dict(type="category",
                                           categoryorder="array", categoryarray=times,
                                           tickangle=-45, nticks=14),
                                legend=dict(orientation="h", y=-0.45),
                                margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig7, use_container_width=True)
-
-            fig9 = go.Figure()
-            for mi, k in enumerate(chart_strikes):
-                s = intr_s[intr_s.strike == k]
-                fig9.add_trace(go.Scatter(
-                    x=s.time, y=s.volume, mode="lines+markers",
-                    name=f"{k:,}",
-                    line=dict(color=_COLORS[mi % len(_COLORS)], width=1.4, dash="dot")))
-            fig9.update_layout(height=240, template="plotly_white",
-                               title=f"{_fmt_cm(cm_sel)} {ot_sel} 出来高 日内"
-                                     "（累積・取引日ごとにリセット）",
-                               yaxis_title="枚",
-                               xaxis=dict(type="category",
-                                          categoryorder="array", categoryarray=times,
-                                          tickangle=-45, nticks=14),
-                               legend=dict(orientation="h", y=-0.55),
-                               margin=dict(l=0, r=0, t=30, b=0))
-            st.plotly_chart(fig9, use_container_width=True)
 
     # ---------------- 補助情報（expander） ----------------
     with st.expander("IVスマイル（選択限月・最終スナップショット）"):
