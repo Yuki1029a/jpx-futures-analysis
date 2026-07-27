@@ -2,7 +2,6 @@
 
 Data: R2 qri_iv/raw/YYYYMMDD/*.parquet (scripts/fetch_qri_iv.py が収集)
 主目的: 行使価格別の Δ建玉×ΔIV からフロー（買われたか・売られたか）を判定する。
-スマイル・ATM時系列は補助情報としてexpanderに格納。
 """
 from __future__ import annotations
 
@@ -37,11 +36,6 @@ def _keys(day_str: str):
 def _snapshot(key: str) -> pd.DataFrame:
     df = load_snapshot(key)
     return pd.DataFrame() if df is None else df
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _daily(days: tuple) -> pd.DataFrame:
-    return iv_views.daily_atm_series(list(days))
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -124,19 +118,28 @@ def main() -> None:
 
     fl, fmeta = _flow(tuple(days_sel), cm_sel)
 
+    # 行使リストはスナップショットの全掲載行使から作る。
+    # （夕場スナップショットはOI列が全欠損になるため、OIの有無で絞ると
+    # 夜間閲覧時にセクションごと消える）
     g_now = df[(df.contract_month == cm_sel) & (df.option_type == ot_sel)].copy()
-    g_now = g_now[g_now.oi.notna()]
     strike_opts = sorted(g_now.strike.astype(int).unique().tolist())
 
-    # 既定の行使 = Δ建玉の絶対値上位5本（フロー未算出時は建玉上位5本）
+    # 既定の行使 = Δ建玉上位5 → 建玉上位5（JPX） → 中位5本 の順でフォールバック
     default_strikes: list[int] = []
     if len(fl):
-        f_ot = fl[(fl.option_type == ot_sel) & fl.d_oi.notna() & (fl.d_oi != 0)]
-        f_ot = f_ot.reindex(f_ot.d_oi.abs().sort_values(ascending=False).index)
-        default_strikes = [int(k) for k in f_ot.head(5).strike if int(k) in strike_opts]
+        f_ot = fl[fl.option_type == ot_sel]
+        m1 = f_ot[f_ot.d_oi.notna() & (f_ot.d_oi != 0)]
+        m1 = m1.reindex(m1.d_oi.abs().sort_values(ascending=False).index)
+        default_strikes = [int(k) for k in m1.head(5).strike if int(k) in strike_opts]
+        if not default_strikes:
+            m2 = f_ot[f_ot.oi.notna()].sort_values("oi", ascending=False)
+            default_strikes = [int(k) for k in m2.head(5).strike if int(k) in strike_opts]
     if not default_strikes:
-        default_strikes = sorted(
-            g_now.sort_values("oi", ascending=False).head(5).strike.astype(int).tolist())
+        g_oi = g_now[g_now.oi.notna()].sort_values("oi", ascending=False)
+        default_strikes = sorted(g_oi.head(5).strike.astype(int).tolist())
+    if not default_strikes and strike_opts:
+        mid = len(strike_opts) // 2
+        default_strikes = strike_opts[max(0, mid - 2):mid + 3]
 
     with sc3:
         sel_mode = st.radio("行使の選び方", ["Δ建玉上位5", "範囲指定", "個別指定"],
@@ -321,58 +324,5 @@ def main() -> None:
                                legend=dict(orientation="h", y=-0.45),
                                margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig7, use_container_width=True)
-
-    # ---------------- 補助情報（expander） ----------------
-    with st.expander("IVスマイル（選択限月・最終スナップショット）"):
-        sm = iv_views.smile_frame(df, [cm_sel])
-        fig = go.Figure()
-        for ot, dashv, col in (("CALL", "solid", _COLORS[0]), ("PUT", "dot", _COLORS[1])):
-            s = sm[sm.option_type == ot]
-            if not len(s):
-                continue
-            fig.add_trace(go.Scatter(
-                x=s.strike, y=s.iv_pct, mode="lines+markers",
-                name=f"{_fmt_cm(cm_sel)} {ot}",
-                line=dict(color=col, dash=dashv, width=1.6),
-                marker=dict(size=4)))
-        if len(srow) and pd.notna(srow.iloc[0].atm_strike):
-            fig.add_vline(x=float(srow.iloc[0].atm_strike),
-                          line=dict(color="gray", width=0.8, dash="dash"))
-        fig.update_layout(height=380, template="plotly_white",
-                          xaxis_title="行使価格", yaxis_title="IV (%)",
-                          legend=dict(orientation="h", y=-0.18),
-                          margin=dict(l=0, r=0, t=10, b=0))
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption("実線=CALL / 点線=PUT / 縦破線=ATM行使価格。"
-                   "特定行使の局所的な盛り上がり・凹みはフロー集中の痕跡")
-
-    with st.expander("ATM IV 日次推移（全限月）"):
-        hist = _daily(tuple(days_sel[-n_hist:]))
-        if len(hist):
-            fig3 = go.Figure()
-            for mi, cm in enumerate(sorted(hist.contract_month.unique())):
-                s = hist[hist.contract_month == cm]
-                fig3.add_trace(go.Scatter(
-                    x=s.day, y=s.atm_iv_pct, mode="lines+markers",
-                    name=_fmt_cm(cm),
-                    line=dict(color=_COLORS[mi % len(_COLORS)], width=1.8)))
-            fig3.update_layout(height=300, template="plotly_white",
-                               yaxis_title="ATM IV (%)",
-                               legend=dict(orientation="h", y=-0.3),
-                               margin=dict(l=0, r=0, t=10, b=0))
-            st.plotly_chart(fig3, use_container_width=True)
-        else:
-            st.info("日次データなし")
-
-    with st.expander("スナップショット生データ（選択限月）"):
-        only_sel = st.checkbox("選択した行使価格のみ", value=True, key="raw_only_sel")
-        show = df[df.contract_month == cm_sel].copy()
-        if only_sel and strikes_sel:
-            show = show[show.strike.astype(int).isin(strikes_sel)]
-        show = show.sort_values(["option_type", "strike"])
-        for c in ("iv", "ask_iv", "bid_iv"):
-            show[c] = (show[c] * 100).round(2)
-        st.dataframe(show, use_container_width=True, height=420)
-
 
 main()

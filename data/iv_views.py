@@ -130,14 +130,6 @@ def month_summary(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("contract_month").reset_index(drop=True)
 
 
-def smile_frame(df: pd.DataFrame, months: list[str]) -> pd.DataFrame:
-    """Long frame for smile plot: contract_month, option_type, strike, iv(%), oi."""
-    m = with_eff_iv(df)
-    m = m[m.contract_month.isin(months) & m.eff_iv.notna()]
-    m["iv_pct"] = m.eff_iv * 100.0
-    return m[["contract_month", "option_type", "strike", "iv_pct", "oi"]].sort_values("strike")
-
-
 def strike_daily_oi_jpx(days: list[str], cm: str, option_type: str,
                         strikes: list[int]) -> pd.DataFrame:
     """JPX建玉残高表ベースの行使価格別・日次建玉残（取引日のみ）。
@@ -248,20 +240,6 @@ def _jpx_daily_oi_frame(trade_day: date, cm: str) -> pd.DataFrame | None:
         "oi": float(r.current_oi), "d_oi": float(r.net_change),
         "volume": float(r.trading_volume),
     } for r in recs])
-
-
-def _day_last_key_1659(day_str: str) -> str | None:
-    """その日の「16:59:59以前で最後」のスナップショットキー（無ければ当日最終）。
-
-    17:00以降の夕場スナップショットは翌取引日分の値動きを含むため、
-    日次系列・IV窓の端からは除外する（取引日＝前日ナイト＋当日日中に対応）。
-    """
-    keys = snapshot_keys(day_str)
-    if not keys:
-        return None
-    pre = [k for k in keys
-           if k.rsplit("_", 1)[-1].split(".")[0] <= "165959"]
-    return pre[-1] if pre else keys[-1]
 
 
 def _day_iv_snapshot(day_str: str, cm: str, min_rows: int = 5,
@@ -449,30 +427,3 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
             "volume": None if pd.isna(rc.volume) else float(rc.volume),
         })
     return _level_judge(pd.DataFrame(rows), lvl_q, lvl_all, meta)
-
-
-def daily_atm_series(days: list[str]) -> pd.DataFrame:
-    """ATM IV / skew per month for each day (16:59以前の最終スナップショット).
-
-    Returns columns: day (date), contract_month, atm_iv_pct, skew25_pct.
-    """
-    rows = []
-    for d in days:
-        key = _day_last_key_1659(d)
-        if key is None:
-            continue
-        df = load_snapshot(key)
-        if df is None or df.empty:
-            continue
-        dt = date(int(d[:4]), int(d[4:6]), int(d[6:8]))
-        for cm, g in with_eff_iv(df).groupby("contract_month"):
-            atm = _atm_row(g)
-            c25 = _delta_iv(g, "CALL", 0.25)
-            p25 = _delta_iv(g, "PUT", -0.25)
-            rows.append({
-                "day": dt,
-                "contract_month": cm,
-                "atm_iv_pct": None if atm is None or pd.isna(atm.eff_iv) else atm.eff_iv * 100.0,
-                "skew25_pct": None if (c25 is None or p25 is None) else (p25 - c25) * 100.0,
-            })
-    return pd.DataFrame(rows)
