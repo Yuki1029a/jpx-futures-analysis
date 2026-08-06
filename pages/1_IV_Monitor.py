@@ -19,7 +19,7 @@ from data.qri_iv_loader import load_snapshot
 
 st.set_page_config(page_title="IVモニター", layout="wide")
 
-_TTL = 600  # R2は15分毎更新のため10分キャッシュ
+_TTL = 300  # JPX公表・QRI収集とも時刻が揺れるため5分で再取得
 
 
 @st.cache_data(ttl=_TTL, show_spinner=False)
@@ -38,7 +38,7 @@ def _snapshot(key: str) -> pd.DataFrame:
     return pd.DataFrame() if df is None else df
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def _strike_daily(days: tuple, cm: str, ot: str, strikes: tuple) -> pd.DataFrame:
     return iv_views.strike_daily_series(list(days), cm, ot, list(strikes))
 
@@ -48,7 +48,7 @@ def _strike_intra(days: tuple, n_days: int, cm: str, ot: str, strikes: tuple) ->
     return iv_views.strike_intraday_series(list(days), n_days, cm, ot, list(strikes))
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def _strike_oi_jpx(days: tuple, cm: str, ot: str, strikes: tuple) -> pd.DataFrame:
     return iv_views.strike_daily_oi_jpx(list(days), cm, ot, list(strikes))
 
@@ -99,6 +99,10 @@ def main() -> None:
     else:
         n_hist = len(days)
     intra_n = st.sidebar.slider("日内チャートの日数", 1, 5, 3)
+    # JPXの建玉残高表は公表時刻が日によってずれるため、手動で即時再取得できるようにする
+    if st.sidebar.button("最新データに更新", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
 
     upd = df.source_update_time.dropna()
     st.caption(f"最終スナップショット: {iv_views.key_time_label(key)}  |  "

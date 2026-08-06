@@ -33,11 +33,18 @@ def main():
     ensure_cache_dirs()
 
     # --- 1. Daily OI balance (open_interest.xlsx) ---
-    content = download_daily_oi_excel(today)
-    if content is None:
-        logger.warning("No daily OI file for %s (holiday or not yet published)", today)
-    else:
-        logger.info("Daily OI: %d bytes for %s", len(content), today)
+    # 公表時刻は日によってずれる（定時実行時に未公表のことがある）ため、
+    # 当日だけでなく直近3日分を毎回試行し、取りこぼしを次回実行で回収する。
+    # 取得済みの日はローカル/R2キャッシュが効くので再ダウンロードは発生しない。
+    for back in range(3, -1, -1):
+        d = today - timedelta(days=back)
+        if d.weekday() >= 5:
+            continue
+        content = download_daily_oi_excel(d)
+        if content is None:
+            logger.warning("No daily OI file for %s (holiday or not yet published)", d)
+        else:
+            logger.info("Daily OI: %d bytes for %s", len(content), d)
 
     # --- 2. Participant volume (手口 Excel) ---
     try:

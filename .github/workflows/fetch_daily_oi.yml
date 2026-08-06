@@ -6,6 +6,10 @@ on:
     - cron: '0 9 * * 1-5'
     # 11:15 UTC = 20:15 JST — daily OI balance (建玉残高)
     - cron: '15 11 * * 1-5'
+    # 12:15 UTC = 21:15 JST — 建玉残高の公表が遅れた日の追い掛け
+    - cron: '15 12 * * 1-5'
+    # 22:15 UTC = 翌朝07:15 JST — 取りこぼし回収（スクリプト側で直近3日分を試行）
+    - cron: '15 22 * * 1-5'
   workflow_dispatch:
 
 permissions:
