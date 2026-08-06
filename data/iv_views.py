@@ -284,18 +284,54 @@ def _is_trading_day(day_str: str) -> bool:
         return False
 
 
-def _level_judge(out: pd.DataFrame, lvl_q: list, lvl_all: list,
+def _theil_sen(pairs: list) -> tuple[float, float, float]:
+    """(strike, ΔIV)ペアの頑健直線フィット。Returns (a, b, k_ref)。
+
+    b＝全ペア勾配の中央値、a＝残差中央値。外れ値（事故気配・フローが乗った
+    行使自体）に頑健（破壊点約29%）。ペア不足や行使一様なら傾き0で退化。
+    """
+    if not pairs:
+        return 0.0, 0.0, 0.0
+    ks = [float(k) for k, _ in pairs]
+    vs = [float(v) for _, v in pairs]
+    k_ref = float(pd.Series(ks).median())
+    if len(pairs) < 8 or max(ks) == min(ks):
+        return float(pd.Series(vs).median()), 0.0, k_ref
+    slopes = []
+    n = len(pairs)
+    for i in range(n):
+        ki, vi = ks[i], vs[i]
+        for j in range(i + 1, n):
+            dk = ks[j] - ki
+            if dk:
+                slopes.append((vs[j] - vi) / dk)
+    b = float(pd.Series(slopes).median()) if slopes else 0.0
+    a = float(pd.Series([v - b * k for k, v in zip(ks, vs)]).median())
+    return a, b, k_ref
+
+
+def _level_judge(out: pd.DataFrame, pairs_q: list, pairs_all: list,
                  meta: dict) -> tuple[pd.DataFrame, dict]:
-    """地合い（限月内・両気配ストライクのΔIV中央値）を控除し4象限判定を付与。"""
+    """地合い控除＋4象限判定。
+
+    ΔIVの横断面を「レベル a ＋ 行使方向の傾き b·K」でロバスト回帰し、
+    残差を超過ΔIVとする。傾き項はスキュー回転（第2主成分：プット翼↑
+    コール翼↓等）を吸収する。レベル単独控除ではスポット変動日にプット
+    全体＋／コール全体−の系統残差が出てフローと誤認される
+    （2026-08-05実測: タイプ別中央値の乖離+4.3pt）。
+    meta: level_pct=中心行使での地合い、slope_per1000=傾き(pt/行使1000円)。
+    """
     if not len(out):
         return out, meta
     for c in ("oi", "d_oi", "iv_pct", "d_iv_pct", "volume"):
         out[c] = pd.to_numeric(out[c], errors="coerce")  # 全None列のobject化を防ぐ
-    pool = lvl_q if len(lvl_q) >= 5 else lvl_all
-    level = float(pd.Series(pool).median()) if pool else 0.0
-    meta["level_pct"] = level
-    meta["n_level"] = len(pool)
-    out["d_iv_ex_pct"] = out.d_iv_pct - level
+    pairs = pairs_q if len(pairs_q) >= 8 else pairs_all
+    a, b, k_ref = _theil_sen(pairs)
+    meta["level_pct"] = a + b * k_ref
+    meta["slope_per1000"] = b * 1000.0
+    meta["k_ref"] = k_ref
+    meta["n_level"] = len(pairs)
+    out["d_iv_ex_pct"] = out.d_iv_pct - (a + b * out.strike)
 
     def _judge(r):
         if pd.isna(r.d_oi) or r.d_oi == 0 or pd.isna(r.d_iv_ex_pct):
@@ -317,8 +353,9 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
       取引日Tのセッション（T-1ナイト＋T日中）と窓が定義から一致する。
     フォールバック（source="qri"）: QRIのOI欄は翌取引日朝反映のため、
       OIが実際に動いた2時点ペアを探し、IV窓を1段前へシフトして整合させる。
-    地合い（サーフェス平行移動）は限月内・両気配ストライクのΔIV中央値 level
-    で控除し、超過ΔIV = ΔIV−level の符号で判定する。
+    地合いは限月内・両気配ストライクの(行使, ΔIV)横断面への頑健直線フィット
+    「レベル＋傾き」（平行移動＋スキュー回転）で控除し、残差＝超過ΔIVの符号で
+    判定する（詳細は _level_judge）。
     Returns (df, meta):
       df   : option_type, strike, oi, d_oi, iv_pct, d_iv_pct, d_iv_ex_pct,
              volume, judge
@@ -326,7 +363,8 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
              iv_days, level_pct, n_level, aligned
     """
     meta = {"source": None, "trade_day": None, "oi_days": None, "iv_days": None,
-            "level_pct": 0.0, "n_level": 0, "aligned": True}
+            "level_pct": 0.0, "slope_per1000": 0.0, "k_ref": None,
+            "n_level": 0, "aligned": True}
     desc = [d for d in reversed(days)]
 
     # ---- 1) JPX建玉残高表（当日分・系列別） ----
@@ -353,10 +391,10 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
             d_iv = None
             if cv is not None and pv is not None and pd.notna(cv) and pd.notna(pv):
                 d_iv = float(cv - pv) * 100.0
-                lvl_all.append(d_iv)
+                lvl_all.append((int(r.strike), d_iv))
                 if (pd.notna(ci.ask_iv.get(key)) and pd.notna(ci.bid_iv.get(key))
                         and pd.notna(pi.ask_iv.get(key)) and pd.notna(pi.bid_iv.get(key))):
-                    lvl_q.append(d_iv)
+                    lvl_q.append((int(r.strike), d_iv))
             rows.append({
                 "option_type": r.option_type, "strike": int(r.strike),
                 "oi": r.oi, "d_oi": r.d_oi,
@@ -414,10 +452,10 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
         d_iv = None
         if c_iv is not None and p_iv is not None and pd.notna(c_iv) and pd.notna(p_iv):
             d_iv = float(c_iv - p_iv) * 100.0
-            lvl_all.append(d_iv)
+            lvl_all.append((int(key[1]), d_iv))
             if (pd.notna(ivc.ask_iv.get(key)) and pd.notna(ivc.bid_iv.get(key))
                     and pd.notna(ivp.ask_iv.get(key)) and pd.notna(ivp.bid_iv.get(key))):
-                lvl_q.append(d_iv)
+                lvl_q.append((int(key[1]), d_iv))
         rows.append({
             "option_type": key[0], "strike": int(key[1]),
             "oi": None if pd.isna(rc.oi) else float(rc.oi),

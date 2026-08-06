@@ -196,11 +196,13 @@ def main() -> None:
     else:
         win_txt = ""
     if win_txt:
-        lvl_txt = f"地合い（限月内ΔIV中央値）: {fmeta['level_pct']:+.2f}%pt（n={fmeta['n_level']}）"
+        slope = fmeta.get("slope_per1000", 0.0)
+        lvl_txt = (f"地合い: レベル {fmeta['level_pct']:+.2f}%pt / "
+                   f"傾き {slope:+.2f}pt/行使千円（n={fmeta['n_level']}）")
         st.caption(f"{atm_txt}  |  {lvl_txt}  |  {win_txt}")
     else:
         st.caption(atm_txt)
-    st.caption("判定 = Δ建玉 × 超過ΔIV（ΔIVから地合いを控除）: "
+    st.caption("判定 = Δ建玉 × 超過ΔIV（ΔIVから地合い＝レベルと傾き〔スキュー回転〕を控除）: "
                "建玉増×IV上昇=新規買い / 建玉増×IV低下=新規売り / "
                "建玉減×IV上昇=買い戻し / 建玉減×IV低下=手仕舞い / "
                f"|超過ΔIV|<{iv_views._NEUTRAL_BAND}%ptは中立")
@@ -224,7 +226,7 @@ def main() -> None:
         fig8.update_layout(height=420, template="plotly_white",
                            title="Δ建玉 × 超過ΔIV（全ストライク）",
                            xaxis_title="Δ建玉 (枚)",
-                           yaxis_title="超過ΔIV (%pt, 地合い控除後)",
+                           yaxis_title="超過ΔIV (%pt, レベル・傾き控除後)",
                            legend=dict(orientation="h", y=-0.2),
                            margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig8, use_container_width=True)
