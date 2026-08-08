@@ -1,4 +1,4 @@
-# touched 2026-07-14: force full env rebuild (stale-module hot-reload workaround)
+# touched 2026-08-08: force full env rebuild (stale-module hot-reload workaround)
 streamlit>=1.30.0
 openpyxl>=3.1.0
 pandas>=2.0.0
