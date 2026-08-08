@@ -59,8 +59,6 @@ def _flow(days: tuple, cm: str):
 
 
 _COLORS = ["#14285a", "#ba7517", "#1d9e75", "#993556", "#534ab7", "#888780"]
-_JUDGE_COLORS = {"新規買い": "#1d9e75", "新規売り": "#c83c3c",
-                 "買い戻し": "#378add", "手仕舞い": "#888780", "中立": "#c9c5bc"}
 
 
 def _fmt_cm(cm: str) -> str:
@@ -207,28 +205,6 @@ def main() -> None:
 
     # ---- Δ建玉 × 超過ΔIV 判定 ----
     if len(fl):
-        fl2 = fl[fl.judge != ""].copy()
-        fig8 = go.Figure()
-        for jname, jcol in _JUDGE_COLORS.items():
-            s = fl2[fl2.judge == jname]
-            if not len(s):
-                continue
-            fig8.add_trace(go.Scatter(
-                x=s.d_oi, y=s.d_iv_ex_pct, mode="markers+text", name=jname,
-                text=[f"{'P' if t == 'PUT' else 'C'}{k:,}"
-                      for t, k in zip(s.option_type, s.strike)],
-                textposition="top center", textfont=dict(size=9),
-                marker=dict(color=jcol, size=10, opacity=0.8)))
-        fig8.add_vline(x=0, line=dict(color="gray", width=0.5))
-        fig8.add_hline(y=0, line=dict(color="gray", width=0.5))
-        fig8.update_layout(height=420, template="plotly_white",
-                           title="Δ建玉 × 超過ΔIV（全ストライク）",
-                           xaxis_title="Δ建玉 (枚)",
-                           yaxis_title="超過ΔIV (%pt, 地合い控除後)",
-                           legend=dict(orientation="h", y=-0.2),
-                           margin=dict(l=0, r=0, t=30, b=0))
-        st.plotly_chart(fig8, use_container_width=True)
-
         # テーブルはΔ建玉が動いた全系列が母集団（IV欠損=判定不能も含める）
         tbl = fl[fl.d_oi.notna() & (fl.d_oi != 0)].copy()
         tbl["judge"] = tbl.judge.where(tbl.judge != "", "判定不能(IV欠損)")
