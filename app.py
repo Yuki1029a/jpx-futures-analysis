@@ -32,7 +32,7 @@ st.set_page_config(
 ensure_cache_dirs()
 
 # Debug: deployment version
-_APP_VERSION = "2026-03-04a"
+_APP_VERSION = "2026-09-08a"
 
 
 def _get_or_load(product, contract_month, week, sk_str, session_keys):
