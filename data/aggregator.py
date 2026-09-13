@@ -48,10 +48,30 @@ def _ensure_trading_date_index():
         _next_td_map[_trading_dates_cache[i]] = _trading_dates_cache[i + 1]
 
 
-def _get_next_trading_date(d: date) -> date | None:
-    """Return the next trading date after d."""
+def _rebuild_trading_date_index():
+    """Force-refresh the trading-date index.
+
+    プロセス生存中に新しい取引日が公表される（または初回構築時にJPX指数の
+    取得が一部失敗して不完全な索引ができる）と、夜間セッションの翌取引日
+    解決が永続的に失敗する。索引ミス時はこれで作り直す。
+    """
+    global _trading_dates_cache, _next_td_map
+    _trading_dates_cache = None
+    _next_td_map = None
     _ensure_trading_date_index()
-    return _next_td_map.get(d)
+
+
+def _get_next_trading_date(d: date) -> date | None:
+    """Return the next trading date after d (rebuilds a stale index once)."""
+    _ensure_trading_date_index()
+    nxt = _next_td_map.get(d)
+    if nxt is None:
+        # 索引が古い/不完全な可能性 → 再構築して1回だけ再解決
+        # （dが真に最新取引日の場合もここに来るが、月次indexはfetch_json側で
+        # 1時間キャッシュされるため再構築コストは実質毎時1回に抑えられる）
+        _rebuild_trading_date_index()
+        nxt = _next_td_map.get(d)
+    return nxt
 
 
 def _get_prev_trading_date(d: date) -> date | None:
@@ -695,6 +715,38 @@ def load_option_weekly_data(
 
 
 _daily_oi_parse_cache: dict[str, list[DailyOIBalance]] = {}
+
+
+def load_op_market_value(week_days: list[date]) -> dict[date, dict]:
+    """日経225オプションの日次 P/C 売買代金（取引概況whole_dayの合計行）。
+
+    JPXには最新営業日分しか無いため、過去日はキャッシュ（L1/R2、日次収集で
+    蓄積）のみ参照し、直近3日だけライブ取得を試みる。
+    Returns {trade_date: {put_value, call_value, total_value, *_jnet, ...}}（円）。
+    """
+    from data.cache import get_cached_bytes
+    from data.parser_market_data import parse_op_market_data
+
+    out: dict[date, dict] = {}
+    today = date.today()
+    for td in week_days:
+        url = config.MARKET_DATA_URL_TEMPLATE.format(
+            yyyymmdd=td.strftime("%Y%m%d"), session="whole_day")
+        content = get_cached_bytes(url, config.CACHE_MARKET_DATA_DIR,
+                                   max_age_hours=24 * 3650)
+        if content is None and (today - td).days <= 3:
+            content = fetcher.download_market_data_excel(td, "whole_day")
+        if content is None:
+            continue
+        try:
+            rows = parse_op_market_data(content)
+        except Exception:
+            logger.warning("parse_op_market_data failed for %s", td, exc_info=True)
+            continue
+        total = next((r for r in rows if "合計" in r["session"]), None)
+        if total:
+            out[td] = total
+    return out
 
 
 def _load_daily_oi_for_date(

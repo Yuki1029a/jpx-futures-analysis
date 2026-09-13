@@ -12,6 +12,7 @@ from data.cached_loaders import (
     wk_key,
     cached_option_contract_months,
     cached_put_call_daily_volumes,
+    cached_op_market_value,
 )
 
 
@@ -155,3 +156,71 @@ def render_put_call_volume_section(week: WeekDefinition) -> None:
                 st.metric("週間 P/C 比", f"{week_put_vol / week_call_vol:.2f}")
 
     st.caption(f"対象: {target_label}  /  ソース: open_interest_e.xlsx Attachment1")
+
+    _render_value_section(week)
+
+
+def _render_value_section(week: WeekDefinition) -> None:
+    """PUT/CALL 売買代金（日経225オプション・全限月、取引概況ベース）。"""
+    st.markdown("---")
+    st.subheader("PUT/CALL 日次売買代金（日経225オプション・全限月）")
+
+    vals = cached_op_market_value(wk_key(week))
+    if not vals:
+        st.info("売買代金データなし（取引概況の収集は2026-09-13開始。"
+                "JPXには最新営業日分しか掲載されないため、それ以前の日は表示できません）")
+        return
+
+    day_col_names = []
+    for td in week.trading_days:
+        dow = _DOW_JP[td.weekday()]
+        day_col_names.append(f"{td.strftime('%m/%d')}({dow})")
+
+    OKU = 1e8  # 億円換算
+    put_row = {"指標": "PUT 代金(億円)"}
+    call_row = {"指標": "CALL 代金(億円)"}
+    ratio_row = {"指標": "P/C 比(代金)"}
+    jnet_row = {"指標": "J-NET比率"}
+
+    wk_put = wk_call = wk_total = wk_total_jnet = 0.0
+    for td, col in zip(week.trading_days, day_col_names):
+        d = vals.get(td)
+        if d is None:
+            put_row[col] = call_row[col] = ratio_row[col] = jnet_row[col] = None
+            continue
+        pv, cv = d["put_value"], d["call_value"]
+        put_row[col] = pv / OKU
+        call_row[col] = cv / OKU
+        ratio_row[col] = (pv / cv) if cv > 0 else None
+        jnet_row[col] = (d["total_value_jnet"] / d["total_value"]
+                         if d["total_value"] > 0 else None)
+        wk_put += pv
+        wk_call += cv
+        wk_total += d["total_value"]
+        wk_total_jnet += d["total_value_jnet"]
+
+    put_row["週間計"] = wk_put / OKU if wk_put else None
+    call_row["週間計"] = wk_call / OKU if wk_call else None
+    ratio_row["週間計"] = (wk_put / wk_call) if wk_call > 0 else None
+    jnet_row["週間計"] = (wk_total_jnet / wk_total) if wk_total > 0 else None
+
+    df = pd.DataFrame([put_row, call_row, ratio_row, jnet_row])
+
+    def _fmt(v, kind):
+        if pd.isna(v):
+            return "-"
+        if kind == "PUT 代金(億円)" or kind == "CALL 代金(億円)":
+            return f"{float(v):,.1f}"
+        if kind == "P/C 比(代金)":
+            return f"{float(v):.2f}"
+        return f"{float(v):.1%}"
+
+    display_df = df.copy()
+    for c in display_df.columns:
+        if c == "指標":
+            continue
+        display_df[c] = df.apply(lambda r, col=c: _fmt(r[col], r["指標"]), axis=1)
+
+    st.dataframe(display_df, use_container_width=True, height=200, hide_index=True)
+    st.caption("ソース: 先物・オプション取引概況（whole_day、夜間+日中の取引日合計）。"
+               "円ベース。J-NET比率=総代金に占める立会外の割合")

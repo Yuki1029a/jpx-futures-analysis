@@ -9,9 +9,18 @@ CACHE_VOLUME_DIR = CACHE_DIR / "volume"
 CACHE_OI_DIR = CACHE_DIR / "oi"
 CACHE_INDEX_DIR = CACHE_DIR / "index"
 CACHE_DAILY_OI_DIR = CACHE_DIR / "daily_oi"
+CACHE_MARKET_DATA_DIR = CACHE_DIR / "market_data"
 
 # --- JPX API Base ---
 JPX_BASE_URL = "https://www.jpx.co.jp"
+
+# --- Derivatives market data (先物・オプション取引概況: P/C別売買代金) ---
+# JPXは最新営業日分しか掲載しない（過去日は404）ため、日次収集でR2に履歴を蓄積する。
+# session: "whole_day"（夜間+前場+後場+合計） / "night"
+MARKET_DATA_URL_TEMPLATE = (
+    JPX_BASE_URL + "/markets/derivatives/trading-volume/tvdivq00000014nn-att/"
+    "{yyyymmdd}_derivatives_market_data_{session}.xlsx"
+)
 
 # --- Daily Volume (売買高) ---
 VOLUME_MONTHLY_LIST_URL = (

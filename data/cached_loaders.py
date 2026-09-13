@@ -18,6 +18,7 @@ from data.aggregator import (
     load_daily_futures_oi,
     load_option_weekly_data,
     load_put_call_daily_volumes,
+    load_op_market_value,
     get_available_contract_months,
     get_available_option_contract_months,
     get_option_participants,
@@ -108,3 +109,8 @@ def cached_option_weekly_data(week_key, contract_month, sk_str, pid_str):
 @st.cache_data(ttl=_TTL, show_spinner=False)
 def cached_put_call_daily_volumes(week_key, contract_month):
     return load_put_call_daily_volumes(_reconstruct(week_key), contract_month)
+
+
+@st.cache_data(ttl=_TTL, show_spinner=False)
+def cached_op_market_value(week_key):
+    return load_op_market_value(_reconstruct(week_key).trading_days)

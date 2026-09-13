@@ -91,6 +91,27 @@ def download_oi_excel(file_path: str) -> bytes:
     return fetch_excel(url, config.CACHE_OI_DIR)
 
 
+def download_market_data_excel(trade_date: date, session: str = "whole_day") -> bytes | None:
+    """取引概況Excel（P/C別売買代金入り）。最新営業日以外はJPXに無く404→None。
+
+    キャッシュ（L1/R2）にあれば過去日でもそこから返る。ファイルは確定値で
+    不変のため実質無期限キャッシュ。
+    """
+    url = config.MARKET_DATA_URL_TEMPLATE.format(
+        yyyymmdd=trade_date.strftime("%Y%m%d"), session=session)
+    try:
+        return fetch_excel(url, config.CACHE_MARKET_DATA_DIR, cache_hours=24 * 3650)
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            logger.debug("Market data not found for %s %s", trade_date, session)
+            return None
+        raise
+    except Exception:
+        logger.warning("Failed to fetch market data for %s %s", trade_date, session,
+                       exc_info=True)
+        return None
+
+
 def download_daily_oi_excel(trade_date: date) -> bytes | None:
     """Download daily OI balance Excel for a specific date.
 
