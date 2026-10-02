@@ -14,13 +14,17 @@ CACHE_MARKET_DATA_DIR = CACHE_DIR / "market_data"
 # --- JPX API Base ---
 JPX_BASE_URL = "https://www.jpx.co.jp"
 
-# --- Derivatives market data (先物・オプション取引概況: P/C別売買代金) ---
-# JPXは最新営業日分しか掲載しない（過去日は404）ため、日次収集でR2に履歴を蓄積する。
-# session: "whole_day"（夜間+前場+後場+合計） / "night"
-MARKET_DATA_URL_TEMPLATE = (
-    JPX_BASE_URL + "/markets/derivatives/trading-volume/tvdivq00000014nn-att/"
-    "{yyyymmdd}_derivatives_market_data_{session}.xlsx"
-)
+# --- JPX「当日取引高等」ページの添付ファイル（建玉残高表・取引概況） ---
+# 添付ディレクトリID（xxxx-att）はJPX側のCMS都合で予告なく変わる（2026-09-30に
+# tvdivq00000014nn-att → t13vrt0000026aes-att に変わり3営業日分を取りこぼした）。
+# 取得時はページHTMLから現在のIDを動的に発見し、過去IDは候補として残す
+# （旧URLでキャッシュ済みのファイルを引き続き参照するため）。
+TRADING_VOLUME_INDEX_URL = JPX_BASE_URL + "/markets/derivatives/trading-volume/index.html"
+TRADING_VOLUME_ATT_BASE = JPX_BASE_URL + "/markets/derivatives/trading-volume/"
+KNOWN_ATT_DIRS = ["t13vrt0000026aes-att", "tvdivq00000014nn-att"]  # 新しい順
+# 先物・オプション取引概況（P/C別売買代金）。session: "whole_day" / "night"。
+# JPXは最新営業日分しか掲載しないため日次収集でR2に履歴を蓄積する。
+MARKET_DATA_FILENAME = "{yyyymmdd}_derivatives_market_data_{session}.xlsx"
 
 # --- Daily Volume (売買高) ---
 VOLUME_MONTHLY_LIST_URL = (
@@ -82,12 +86,8 @@ OI_FAR_COLUMNS = {
     "long_volume": 18,    # R  買超
 }
 
-# --- Daily OI Balance ---
-DAILY_OI_URL_TEMPLATE = (
-    "https://www.jpx.co.jp/markets/derivatives/"
-    "trading-volume/tvdivq00000014nn-att/"
-    "{yyyymmdd}open_interest.xlsx"
-)
+# --- Daily OI Balance（建玉残高表。最新営業日分のみ掲載） ---
+DAILY_OI_FILENAME = "{yyyymmdd}open_interest.xlsx"
 
 # --- Target Products ---
 TARGET_PRODUCTS = ["NK225F", "TOPIXF"]

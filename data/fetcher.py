@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import re
+import time
 import requests
 from datetime import date
 from pathlib import Path
@@ -91,42 +93,107 @@ def download_oi_excel(file_path: str) -> bytes:
     return fetch_excel(url, config.CACHE_OI_DIR)
 
 
-def download_market_data_excel(trade_date: date, session: str = "whole_day") -> bytes | None:
-    """取引概況Excel（P/C別売買代金入り）。最新営業日以外はJPXに無く404→None。
+_att_dir_cache: dict[str, tuple[float, str | None]] = {}
+_UA = {"User-Agent": "Mozilla/5.0"}
 
-    キャッシュ（L1/R2）にあれば過去日でもそこから返る。ファイルは確定値で
-    不変のため実質無期限キャッシュ。
+
+def discover_att_dir(filename_pattern: str, cache_hours: float = 1.0) -> str | None:
+    """「当日取引高等」ページHTMLから filename_pattern（正規表現）に合う添付の
+    ディレクトリID（xxxx-att）を発見する。結果はプロセス内で cache_hours 保持。
+
+    JPXの添付IDは予告なく変わる（2026-09-30 実例）ためテンプレート固定にしない。
     """
-    url = config.MARKET_DATA_URL_TEMPLATE.format(
-        yyyymmdd=trade_date.strftime("%Y%m%d"), session=session)
+    now = time.time()
+    hit = _att_dir_cache.get(filename_pattern)
+    if hit and now - hit[0] < cache_hours * 3600:
+        return hit[1]
+    att = None
     try:
-        return fetch_excel(url, config.CACHE_MARKET_DATA_DIR, cache_hours=24 * 3650)
-    except requests.HTTPError as e:
-        if e.response is not None and e.response.status_code == 404:
-            logger.debug("Market data not found for %s %s", trade_date, session)
-            return None
-        raise
+        resp = requests.get(config.TRADING_VOLUME_INDEX_URL, timeout=30, headers=_UA)
+        resp.raise_for_status()
+        m = re.search(r'href="/markets/derivatives/trading-volume/([^"/]+-att)/'
+                      + filename_pattern, resp.text)
+        att = m.group(1) if m else None
     except Exception:
-        logger.warning("Failed to fetch market data for %s %s", trade_date, session,
-                       exc_info=True)
-        return None
+        logger.warning("discover_att_dir failed for %s", filename_pattern, exc_info=True)
+    _att_dir_cache[filename_pattern] = (now, att)
+    return att
+
+
+def _canonical_url(filename: str) -> str:
+    """添付ID非依存のキャッシュキー（実在URLではない。ファイル名が同じなら同じ鍵）。"""
+    return config.TRADING_VOLUME_ATT_BASE + "_canonical_/" + filename
+
+
+def _candidate_urls(filename: str, discover_pattern: str) -> list[str]:
+    dirs: list[str] = []
+    found = discover_att_dir(discover_pattern)
+    if found:
+        dirs.append(found)
+    dirs += [a for a in config.KNOWN_ATT_DIRS if a not in dirs]
+    return [config.TRADING_VOLUME_ATT_BASE + a + "/" + filename for a in dirs]
+
+
+def _cached_any(filename: str, subdir: Path, cache_hours: float) -> bytes | None:
+    """キャッシュ（L1/R2）のみ参照。JPXへは行かない。
+
+    cache.py のキーはURL末尾のファイル名なので、添付IDが違っても同じ鍵になる。
+    正規キーと既知IDのURLは同一ファイルを指すが、将来キー方式が変わっても
+    拾えるよう全候補を順に見る。
+    """
+    urls = [_canonical_url(filename)] + [
+        config.TRADING_VOLUME_ATT_BASE + a + "/" + filename for a in config.KNOWN_ATT_DIRS]
+    seen: set[str] = set()
+    for url in urls:
+        if url in seen:
+            continue
+        seen.add(url)
+        cached = get_cached_bytes(url, subdir, max_age_hours=cache_hours)
+        if cached is not None:
+            return cached
+    return None
+
+
+def _fetch_attachment(filename: str, discover_pattern: str, subdir: Path,
+                      cache_hours: float) -> bytes | None:
+    """キャッシュ（全候補）→ライブ取得（発見ID→既知IDを順に試行、404は次へ）。"""
+    cached = _cached_any(filename, subdir, cache_hours)
+    if cached is not None:
+        return cached
+    for url in _candidate_urls(filename, discover_pattern):
+        try:
+            resp = requests.get(url, timeout=60, headers=_UA)
+            if resp.status_code == 404:
+                logger.debug("404: %s", url)
+                continue
+            resp.raise_for_status()
+            save_to_cache(url, subdir, resp.content)
+            return resp.content
+        except Exception:
+            logger.warning("fetch failed: %s", url, exc_info=True)
+    return None
+
+
+def download_market_data_excel(trade_date: date, session: str = "whole_day") -> bytes | None:
+    """取引概況Excel（P/C別売買代金入り）。最新営業日以外はJPXに無く未取得なら None。
+
+    キャッシュ（L1/R2）にあれば過去日でもそこから返る。確定値で不変のため実質無期限。
+    """
+    fn = config.MARKET_DATA_FILENAME.format(
+        yyyymmdd=trade_date.strftime("%Y%m%d"), session=session)
+    return _fetch_attachment(fn, r"\d{8}_derivatives_market_data_" + session + r"\.xlsx",
+                             config.CACHE_MARKET_DATA_DIR, cache_hours=24 * 3650)
+
+
+def cached_market_data_excel(trade_date: date, session: str = "whole_day") -> bytes | None:
+    """取引概況Excelをキャッシュのみから返す（過去日表示用。JPXへは行かない）。"""
+    fn = config.MARKET_DATA_FILENAME.format(
+        yyyymmdd=trade_date.strftime("%Y%m%d"), session=session)
+    return _cached_any(fn, config.CACHE_MARKET_DATA_DIR, cache_hours=24 * 3650)
 
 
 def download_daily_oi_excel(trade_date: date) -> bytes | None:
-    """Download daily OI balance Excel for a specific date.
-
-    Returns bytes on success, None if file doesn't exist (HTTP 404).
-    Uses English version for consistent parsing.
-    """
-    date_str = trade_date.strftime("%Y%m%d")
-    url = config.DAILY_OI_URL_TEMPLATE.replace("{yyyymmdd}", date_str)
-    try:
-        return fetch_excel(url, config.CACHE_DAILY_OI_DIR, cache_hours=168.0)
-    except requests.HTTPError as e:
-        if e.response is not None and e.response.status_code == 404:
-            logger.debug("Daily OI file not found for %s", trade_date)
-            return None
-        raise
-    except Exception:
-        logger.warning("Failed to fetch daily OI for %s", trade_date, exc_info=True)
-        return None
+    """建玉残高表Excel。キャッシュ優先、無ければ現在の添付IDと既知IDで取得。未存在は None。"""
+    fn = config.DAILY_OI_FILENAME.format(yyyymmdd=trade_date.strftime("%Y%m%d"))
+    return _fetch_attachment(fn, r"\d{8}open_interest\.xlsx",
+                             config.CACHE_DAILY_OI_DIR, cache_hours=168.0)

@@ -724,16 +724,12 @@ def load_op_market_value(week_days: list[date]) -> dict[date, dict]:
     蓄積）のみ参照し、直近3日だけライブ取得を試みる。
     Returns {trade_date: {put_value, call_value, total_value, *_jnet, ...}}（円）。
     """
-    from data.cache import get_cached_bytes
     from data.parser_market_data import parse_op_market_data
 
     out: dict[date, dict] = {}
     today = date.today()
     for td in week_days:
-        url = config.MARKET_DATA_URL_TEMPLATE.format(
-            yyyymmdd=td.strftime("%Y%m%d"), session="whole_day")
-        content = get_cached_bytes(url, config.CACHE_MARKET_DATA_DIR,
-                                   max_age_hours=24 * 3650)
+        content = fetcher.cached_market_data_excel(td, "whole_day")
         if content is None and (today - td).days <= 3:
             content = fetcher.download_market_data_excel(td, "whole_day")
         if content is None:

@@ -270,16 +270,25 @@ def _day_iv_snapshot(day_str: str, cm: str, min_rows: int = 5,
 
 
 def _is_trading_day(day_str: str) -> bool:
-    """JPX建玉残高表の有無で取引日判定（休日・週末はファイルなし）。
+    """取引日判定（JPX建玉残高表の有無 → 手口索引の有無）。休日・週末は偽。
 
     IV窓の起点を直前「取引日」の最終スナップショットに限定するために使う。
     週末スナップショット（ナイトセッション終了後の静止気配）を起点にすると
     金曜ナイト分の変動が窓から漏れるため。
     """
     from data import fetcher
+    d = date(int(day_str[:4]), int(day_str[4:6]), int(day_str[6:8]))
     try:
-        return fetcher.download_daily_oi_excel(
-            date(int(day_str[:4]), int(day_str[4:6]), int(day_str[6:8]))) is not None
+        if fetcher.download_daily_oi_excel(d) is not None:
+            return True
+    except Exception:
+        pass
+    # 建玉残高表はJPXが最新営業日分しか掲載せず、収集漏れ日（例: 2026-09-30,
+    # 10-01 の添付ID変更）は永続欠損になる。取引日判定はそれに依存させず、
+    # 手口（取引参加者別取引高）の月次索引にその日があれば取引日とみなす。
+    try:
+        return any(e.get("TradeDate") == day_str
+                   for e in fetcher.get_volume_index(day_str[:6]))
     except Exception:
         return False
 
