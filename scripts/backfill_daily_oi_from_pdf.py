@@ -41,6 +41,11 @@ from data.parser_market_data import parse_op_market_data  # noqa: E402
 ZIP_URL = ("https://www.jpx.co.jp/automation/markets/statistics-derivatives/daily/files/"
            "{yyyymm}/Daily_Report_OSE_{yyyymmdd}.zip")
 ZIP_DIR = config.CACHE_DIR / "daily_report"
+# 旧形式（〜2026-01）: 日次の統合PDF1本。月別HTML断片にリンクがある
+JSON_BASE = "https://www.jpx.co.jp/automation/markets/statistics-derivatives/daily/json/"
+OLD_PDF_RE = r'href="(/markets/statistics-derivatives/daily/[^"]+-att/{d}_Quotations_Index_Futures_and_Options_and_Equity_Options\.pdf)"'
+_UA = {"User-Agent": "Mozilla/5.0"}
+_month_html: dict[str, str] = {}
 TAG = "【日報PDFより復元】"
 LEFT = [("日経225先物", "NK225F"), ("TOPIX先物", "TOPIXF")]          # parser: 列A 部分一致
 RIGHT = [("日経225mini", "NK225MF"), ("日経225マイクロ", "NK225MicroF"),
@@ -64,15 +69,78 @@ def get_zip(d: date) -> bytes | None:
     return r.content
 
 
-def parse_zip(d: date) -> tuple[list[dict], list[dict]] | None:
-    """日報zip → (先物行, 日経225オプション行)。未公表は None。"""
-    z = get_zip(d)
-    if z is None:
-        return None
+def _month_fragment(yyyymm: str) -> str:
+    if yyyymm not in _month_html:
+        r = requests.get(f"{JSON_BASE}daily_report_{yyyymm}.html", timeout=60, headers=_UA)
+        _month_html[yyyymm] = r.text if r.status_code == 200 else ""
+    return _month_html[yyyymm]
+
+
+def get_old_pdf(d: date) -> bytes | None:
+    """旧形式の統合PDF（指数先物・オプション・有価証券オプション相場表）。"""
+    import re
     ds = d.strftime("%Y%m%d")
-    with zipfile.ZipFile(io.BytesIO(z)) as zf:
-        d1, fut = parse_sif_pdf(zf.read(f"sif_dyr_{ds}.pdf"))
-        d2, opt = parse_siop_pdf(zf.read(f"siop_dyr_{ds}.pdf"))
+    p = ZIP_DIR / f"{ds}_Quotations_Index.pdf"
+    if p.exists():
+        return p.read_bytes()
+    m = re.search(OLD_PDF_RE.format(d=ds), _month_fragment(ds[:6]))
+    if not m:
+        return None
+    r = requests.get(config.JPX_BASE_URL + m.group(1), timeout=120, headers=_UA)
+    if r.status_code != 200 or not r.content.startswith(b"%PDF"):
+        return None
+    ZIP_DIR.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(r.content)
+    return r.content
+
+
+def _split_old_pdf(content: bytes) -> tuple[bytes, bytes]:
+    """統合PDFを先物ページとオプションページに分割（ページ先頭の商品名で判定）。"""
+    from pypdf import PdfReader, PdfWriter
+    rd = PdfReader(io.BytesIO(content))
+    fw, ow = PdfWriter(), PdfWriter()
+    for pg in rd.pages:
+        head = (pg.extract_text() or "")[:400]
+        (ow if "option" in head.lower() else fw).add_page(pg)  # 先物頁の注記に Option は出ない
+    out = []
+    for w in (fw, ow):
+        b = io.BytesIO()
+        w.write(b)
+        out.append(b.getvalue())
+    return out[0], out[1]
+
+
+def list_report_days(start: date, end: date) -> list[date]:
+    """日報が公表された取引日（新形式JSON＋旧形式HTML断片）。"""
+    import re
+    days: set[date] = set()
+    m = date(start.year, start.month, 1)
+    while m <= end:
+        ym = m.strftime("%Y%m")
+        r = requests.get(f"{JSON_BASE}daily_report_{ym}.json", timeout=60, headers=_UA)
+        if r.status_code == 200:
+            days |= {datetime.strptime(e["TradeDate"], "%Y%m%d").date() for e in r.json()["TableDatas"]}
+        days |= {datetime.strptime(x, "%Y%m%d").date()
+                 for x in re.findall(r"(\d{8})_Quotations_Index_Futures", _month_fragment(ym))}
+        m = date(m.year + (m.month == 12), m.month % 12 + 1, 1)
+    return sorted(x for x in days if start <= x <= end)
+
+
+def parse_zip(d: date) -> tuple[list[dict], list[dict]] | None:
+    """日報 → (先物行, 日経225オプション行)。新形式zip、無ければ旧形式PDF。未公表は None。"""
+    ds = d.strftime("%Y%m%d")
+    z = get_zip(d)
+    if z is not None:
+        with zipfile.ZipFile(io.BytesIO(z)) as zf:
+            names = {n.rsplit("/", 1)[-1]: n for n in zf.namelist()}  # 一部の日はサブフォルダ入り
+            sif, siop = zf.read(names[f"sif_dyr_{ds}.pdf"]), zf.read(names[f"siop_dyr_{ds}.pdf"])
+    else:
+        old = get_old_pdf(d)
+        if old is None:
+            return None
+        sif, siop = _split_old_pdf(old)
+    d1, fut = parse_sif_pdf(sif)
+    d2, opt = parse_siop_pdf(siop)
     if d1 != d or d2 != d:
         raise ValueError(f"PDF日付不一致: {d} sif={d1} siop={d2}")
     return fut, opt
@@ -217,12 +285,15 @@ def _prev_file(d: date, built: dict[date, bytes]) -> tuple[date, bytes] | None:
     return None
 
 
-def backfill(dates: list[date], out_dir: Path, upload: bool, force: bool = False) -> dict[date, bytes]:
+def backfill(dates: list[date], out_dir: Path, upload: bool, force: bool = False,
+             seed: int = 0) -> dict[date, bytes]:
+    """seed: 先頭 seed 日は前日建玉の起点として復元のみ行い保存しない。"""
     ensure_cache_dirs()
     out_dir.mkdir(parents=True, exist_ok=True)
     built: dict[date, bytes] = {}
-    for d in sorted(dates):
+    for i, d in enumerate(sorted(dates)):
         ds = d.strftime("%Y%m%d")
+        up = upload and i >= seed
         oi_fn = config.DAILY_OI_FILENAME.format(yyyymmdd=ds)
         md_fn = config.MARKET_DATA_FILENAME.format(yyyymmdd=ds, session="whole_day")
         need_oi = force or fetcher._cached_any(oi_fn, config.CACHE_DAILY_OI_DIR, 24 * 3650) is None
@@ -242,16 +313,16 @@ def backfill(dates: list[date], out_dir: Path, upload: bool, force: bool = False
             (out_dir / oi_fn).write_bytes(oi_x)
             print(f"{ds}: 建玉復元 prev={prev[0] if prev else None} "
                   f"先物{len(parse_daily_futures_oi_excel(oi_x))}行 OP{len(parse_daily_oi_excel(oi_x))}行")
-            if upload:
+            if up:
                 save_to_cache(fetcher._canonical_url(oi_fn), config.CACHE_DAILY_OI_DIR, oi_x)
         if need_md:
             md_x = build_market_xlsx(d, opt)
             (out_dir / md_fn).write_bytes(md_x)
             print(f"{ds}: 取引概況(P/C代金)復元")
-            if upload:
+            if up:
                 save_to_cache(fetcher._canonical_url(md_fn), config.CACHE_MARKET_DATA_DIR, md_x)
-        if upload:
-            print(f"{ds}: キャッシュ(L1+R2)へ保存")
+        if up:
+            print(f"{ds}: キャッシュ(L1+R2)へ保存", flush=True)
     return built
 
 
@@ -296,10 +367,15 @@ if __name__ == "__main__":
     ap.add_argument("--upload", action="store_true")
     ap.add_argument("--force", action="store_true", help="実ファイルがあっても上書き")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--range", nargs=2, metavar=("START", "END"), help="yyyymmdd yyyymmdd（日報公表日のみ）")
+    ap.add_argument("--seed", type=int, default=0, help="先頭N日は保存しない（前日建玉の起点）")
     ap.add_argument("--out", default=str(config.CACHE_DIR / "backfill_out"))
     a = ap.parse_args()
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     if a.selftest:
         selftest(Path(a.out))
     else:
-        backfill([datetime.strptime(s, "%Y%m%d").date() for s in a.dates], Path(a.out), a.upload, a.force)
+        ds = [datetime.strptime(x, "%Y%m%d").date() for x in a.dates]
+        if a.range:
+            ds += list_report_days(*[datetime.strptime(x, "%Y%m%d").date() for x in a.range])
+        backfill(sorted(set(ds)), Path(a.out), a.upload, a.force, a.seed)
