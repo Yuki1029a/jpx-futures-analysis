@@ -105,6 +105,18 @@ def main():
             if content is not None:
                 logger.info("Market data %s %s: %d bytes", d, sess, len(content))
 
+    # --- 4. 日報PDFからの補完 ---
+    # 建玉残高表・取引概況が収集できなかった日（添付ID変更・JPXの掲載停止）を、
+    # 過去分も残る日報zip（Daily_Report_OSE）から復元する。直近7暦日の平日のみ。
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from backfill_daily_oi_from_pdf import backfill
+        days = [today - timedelta(days=b) for b in range(7, 0, -1)
+                if (today - timedelta(days=b)).weekday() < 5]
+        backfill(days, config.CACHE_DIR / "backfill_out", upload=True)
+    except Exception:
+        logger.warning("PDF backfill failed", exc_info=True)
+
     logger.info("Done.")
 
 
