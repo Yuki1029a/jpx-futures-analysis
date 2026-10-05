@@ -20,6 +20,12 @@ _DOW_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
 
 def render_put_call_volume_section(week: WeekDefinition) -> None:
+    """P/C 取引高（限月別）と P/C 売買代金（全限月）。売買代金は取引高の有無に依らず表示する。"""
+    _render_volume_section(week)
+    _render_value_section(week)
+
+
+def _render_volume_section(week: WeekDefinition) -> None:
     """Render daily PUT/CALL aggregate volume table.
 
     Layout:
@@ -157,7 +163,6 @@ def render_put_call_volume_section(week: WeekDefinition) -> None:
 
     st.caption(f"対象: {target_label}  /  ソース: open_interest_e.xlsx Attachment1")
 
-    _render_value_section(week)
 
 
 def _render_value_section(week: WeekDefinition) -> None:
@@ -166,9 +171,12 @@ def _render_value_section(week: WeekDefinition) -> None:
     st.subheader("PUT/CALL 日次売買代金（日経225オプション・全限月）")
 
     vals = cached_op_market_value(wk_key(week))
+    pending = [td for td in week.trading_days if td not in vals]
+    if pending:
+        st.caption("未取得: " + ", ".join(td.strftime("%m/%d") for td in pending)
+                   + "。JPXが2026-09-30以降 取引概況Excelを掲載していないため、売買代金は日報PDF"
+                   "（翌営業日以降に公表）から補完している。公表後の定期収集で自動的に埋まる。")
     if not vals:
-        st.info("売買代金データなし（取引概況の収集は2026-09-13開始。"
-                "JPXには最新営業日分しか掲載されないため、それ以前の日は表示できません）")
         return
 
     day_col_names = []
