@@ -126,6 +126,8 @@ def _canonical_url(filename: str) -> str:
 
 
 def _candidate_urls(filename: str, discover_pattern: str) -> list[str]:
+    if "_derivatives_market_data_" in filename:
+        return [config.MARKET_DATA_FILES_BASE + filename]
     dirs: list[str] = []
     found = discover_att_dir(discover_pattern)
     if found:

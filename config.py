@@ -25,6 +25,9 @@ KNOWN_ATT_DIRS = ["t13vrt0000026aes-att", "tvdivq00000014nn-att"]  # 新しい�
 # 先物・オプション取引概況（P/C別売買代金）。session: "whole_day" / "night"。
 # JPXは最新営業日分しか掲載しないため日次収集でR2に履歴を蓄積する。
 MARKET_DATA_FILENAME = "{yyyymmdd}_derivatives_market_data_{session}.xlsx"
+# 2026-09-30以降、取引概況はページ内JSON経由で以下に掲載（過去分も約1か月残る）。
+# 索引: /automation/markets/derivatives/trading-volume/json/derivatives_market_data_{mor,eve}.json
+MARKET_DATA_FILES_BASE = JPX_BASE_URL + "/automation/markets/derivatives/trading-volume/files/"
 
 # --- Daily Volume (売買高) ---
 VOLUME_MONTHLY_LIST_URL = (

@@ -174,8 +174,7 @@ def _render_value_section(week: WeekDefinition) -> None:
     pending = [td for td in week.trading_days if td not in vals]
     if pending:
         st.caption("未取得: " + ", ".join(td.strftime("%m/%d") for td in pending)
-                   + "。JPXが2026-09-30以降 取引概況Excelを掲載していないため、売買代金は日報PDF"
-                   "（翌営業日以降に公表）から補完している。公表後の定期収集で自動的に埋まる。")
+                   + "（取引概況の日通しは当日17:10頃公表。公表後の定期収集で反映）")
     if not vals:
         return
 
