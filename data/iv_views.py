@@ -42,11 +42,18 @@ def list_available_days(limit: int = 60) -> list[str]:
     return sorted(days)[-limit:]
 
 
+_KEYS_DONE: dict[str, list[str]] = {}  # 2日以上前の日は追加されないので一覧を常駐キャッシュ
+
+
 def snapshot_keys(day_str: str) -> list[str]:
     """Snapshot keys of a day, ascending (oldest first)."""
+    if day_str in _KEYS_DONE:
+        return _KEYS_DONE[day_str]
     d = datetime.strptime(day_str, "%Y%m%d").date()
     keys = list_snapshot_keys(d)
     if keys:
+        if (date.today() - d).days >= 2:
+            _KEYS_DONE[day_str] = keys
         return keys
     local_dir = _LOCAL_ROOT / day_str
     if local_dir.exists():
@@ -210,6 +217,80 @@ def strike_intraday_series(days: list[str], n_days: int, cm: str, option_type: s
                     "volume": None if pd.isna(r.volume) else float(r.volume),
                 })
     return pd.DataFrame(rows)
+
+
+_REDUCED: dict[tuple[str, str], pd.DataFrame | None] = {}
+
+
+def _month_reduced(key: str, cm: str) -> pd.DataFrame | None:
+    """1スナップショット×1限月の縮約表（option_type, strike, eff_iv, volume, atm）。不変なので常駐キャッシュ。"""
+    hit = _REDUCED.get((key, cm), False)
+    if hit is not False:
+        return hit
+    out = None
+    df = load_snapshot(key)
+    if df is not None and not df.empty:
+        m = with_eff_iv(df)
+        gm = m[m.contract_month == cm]
+        if not gm.empty:
+            atm = _atm_row(gm)
+            out = gm[["option_type", "strike", "eff_iv", "volume"]].copy()
+            out["atm"] = None if atm is None else atm.eff_iv
+    if len(_REDUCED) > 6000:
+        _REDUCED.clear()
+    _REDUCED[(key, cm)] = out
+    return out
+
+
+def strike_intraday_ohlc(days: list[str], n_days: int, cm: str, option_type: str,
+                         strikes: list[int], freq: str = "1h") -> pd.DataFrame:
+    """直近n取引日の行使別IVを時間足OHLCに圧縮する（日内チャート用）。
+
+    各スナップショット t で
+      IV_k(t)   = 行使価格 k の実効IV（気配仲値、無ければ約定/清算IV）[%]
+      ATM(t)    = 同限月の ATM IV（_atm_row: CALLデルタ0.5最近傍）[%]
+      超過IV_k(t) = IV_k(t) − ATM(t)                         [%pt]
+    を求め、ts.floor(freq) の足ごとに始値・高値・安値・終値を取る。
+    出来高 dv = 足内のスナップショット間増分の合計（QRI累積出来高の差分。取引日切替でリセット）。
+    Returns: strike, bar(足の開始時刻), day, {iv,ex}_{o,h,l,c}, dv, n
+    """
+    from data.qri_iv_loader import prefetch_snapshots
+    if not days:
+        return pd.DataFrame()
+    anchor = days[-1]
+    tdays = [d for d in days if d == anchor or _is_trading_day(d)][-n_days:]
+    keys = [(d, k) for d in tdays for k in snapshot_keys(d)]
+    prefetch_snapshots([k for _, k in keys])
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(8) as ex:
+        reduced = list(ex.map(lambda dk: _month_reduced(dk[1], cm), keys))
+    parts = []
+    for (d, key), gm in zip(keys, reduced):
+        if gm is None:
+            continue
+        g = gm.loc[(gm.option_type == option_type) & gm.strike.isin(strikes),
+                   ["strike", "eff_iv", "volume", "atm"]].copy()
+        if g.empty:
+            continue
+        g["ts"] = pd.Timestamp(f"{d[:4]}-{d[4:6]}-{d[6:8]} {key_time_label(key)}")
+        g["day"] = d
+        parts.append(g)
+    if not parts:
+        return pd.DataFrame()
+    r = pd.concat(parts, ignore_index=True)
+    r["strike"] = r.strike.astype(int)
+    r["iv"] = r.eff_iv * 100.0
+    r["ex"] = r.iv - pd.to_numeric(r.atm, errors="coerce") * 100.0
+    r = r.sort_values(["strike", "ts"])
+    dv = r.groupby(["strike", "day"]).volume.diff()
+    r["dv"] = dv.where(dv >= 0, r.volume).fillna(r.volume)
+    r["bar"] = r.ts.dt.floor(freq)
+    agg = r.groupby(["strike", "bar"]).agg(
+        day=("day", "first"),
+        iv_o=("iv", "first"), iv_h=("iv", "max"), iv_l=("iv", "min"), iv_c=("iv", "last"),
+        ex_o=("ex", "first"), ex_h=("ex", "max"), ex_l=("ex", "min"), ex_c=("ex", "last"),
+        dv=("dv", "sum"), n=("ts", "size")).reset_index()
+    return agg
 
 
 _QUAD = {(1, 1): "新規買い", (1, -1): "新規売り", (-1, 1): "買い戻し", (-1, -1): "手仕舞い"}

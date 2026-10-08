@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import logging
+from collections import OrderedDict
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -41,9 +42,36 @@ def list_snapshot_keys(day: date) -> list[str]:
         return []
 
 
+_BYTES_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
+_BYTES_MAX = 1500  # 1本 ≈ 30-60KB。15分間隔×5日分を十分収める
+
+
+def _get_bytes(key: str) -> Optional[bytes]:
+    """スナップショットは書き込み後不変なのでプロセス内でバイト列をキャッシュする。"""
+    b = _BYTES_CACHE.get(key)
+    if b is not None:
+        _BYTES_CACHE.move_to_end(key)
+        return b
+    b = r2_storage.r2_get(key)
+    if b is not None:
+        _BYTES_CACHE[key] = b
+        if len(_BYTES_CACHE) > _BYTES_MAX:
+            _BYTES_CACHE.popitem(last=False)
+    return b
+
+
+def prefetch_snapshots(keys: list[str], workers: int = 16) -> None:
+    """未キャッシュのスナップショットをR2から並列取得する（日内チャート高速化）。"""
+    from concurrent.futures import ThreadPoolExecutor
+    todo = [k for k in keys if k not in _BYTES_CACHE]
+    if todo:
+        with ThreadPoolExecutor(workers) as ex:
+            list(ex.map(_get_bytes, todo))
+
+
 def load_snapshot(key: str) -> Optional[pd.DataFrame]:
     """Load one snapshot parquet by full R2 key (with local fallback)."""
-    content = r2_storage.r2_get(key)
+    content = _get_bytes(key)
     if content is None:
         # local fallback: strip prefix → cache path
         rel = key[len(_R2_PREFIX) + 1:] if key.startswith(_R2_PREFIX) else key

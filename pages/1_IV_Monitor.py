@@ -48,6 +48,12 @@ def _strike_intra(days: tuple, n_days: int, cm: str, ot: str, strikes: tuple) ->
     return iv_views.strike_intraday_series(list(days), n_days, cm, ot, list(strikes))
 
 
+@st.cache_data(ttl=_TTL, show_spinner=False)
+def _strike_ohlc(days: tuple, n_days: int, cm: str, ot: str, strikes: tuple,
+                 freq: str) -> pd.DataFrame:
+    return iv_views.strike_intraday_ohlc(list(days), n_days, cm, ot, list(strikes), freq)
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def _strike_oi_jpx(days: tuple, cm: str, ot: str, strikes: tuple) -> pd.DataFrame:
     return iv_views.strike_daily_oi_jpx(list(days), cm, ot, list(strikes))
@@ -260,49 +266,54 @@ def main() -> None:
                 st.caption("※この限月はJPX建玉残高表（別紙1）非掲載のためQRI表示値。"
                            "2026-07-12以前の収集分は4桁以上の建玉が下位桁欠落（既知欠陥）")
 
-        intr_s = _strike_intra(tuple(days_sel), intra_n, cm_sel, ot_sel, ck)
-        if len(intr_s) and "ts" not in intr_s.columns:
-            # 再デプロイ過渡期の旧モジュール/旧キャッシュ互換: day+time からtsを復元
-            intr_s = intr_s.copy()
-            intr_s["ts"] = pd.to_datetime(
-                intr_s.day.str.slice(0, 4) + "-" + intr_s.day.str.slice(4, 6)
-                + "-" + intr_s.day.str.slice(6, 8) + " "
-                + intr_s.time.str.split(" ").str[-1])
-        if len(intr_s):
+        c1, c2 = st.columns([3, 2])
+        mode = c1.radio("日内チャート", ["IV", "超過IV（IV − ATM IV）"], horizontal=True,
+                        key="intra_mode")
+        freq_lab = c2.radio("足", ["30分", "1時間", "2時間"], index=1, horizontal=True,
+                            key="intra_freq")
+        freq = {"30分": "30min", "1時間": "1h", "2時間": "2h"}[freq_lab]
+        ohlc = _strike_ohlc(tuple(days_sel), intra_n, cm_sel, ot_sel, ck, freq)
+        if len(ohlc):
+            pre = "iv" if mode == "IV" else "ex"
             fig7 = go.Figure()
             for mi, k in enumerate(chart_strikes):
-                s = intr_s[intr_s.strike == k]
+                s_ = ohlc[ohlc.strike == k].dropna(subset=[f"{pre}_c"])
+                if s_.empty:
+                    continue
                 col = _COLORS[mi % len(_COLORS)]
-                fig7.add_trace(go.Scatter(
-                    x=s.ts, y=s.iv_pct, mode="lines+markers",
-                    name=f"{k:,}", line=dict(color=col, width=1.6)))
-                # 出来高はスナップショット間の増分（取引日切替のリセット時は当該値）
-                dv = s.volume.diff()
-                dv = dv.where(dv >= 0, s.volume)
-                if len(dv):
-                    dv.iloc[0] = s.volume.iloc[0]
+                # 陽線=塗り、陰線=白抜き。色は行使価格ごとに固定
+                fig7.add_trace(go.Candlestick(
+                    x=s_.bar, open=s_[f"{pre}_o"], high=s_[f"{pre}_h"],
+                    low=s_[f"{pre}_l"], close=s_[f"{pre}_c"], name=f"{k:,}",
+                    increasing=dict(line=dict(color=col, width=1), fillcolor=col),
+                    decreasing=dict(line=dict(color=col, width=1), fillcolor="white")))
                 fig7.add_trace(go.Bar(
-                    x=s.ts, y=dv, name=f"{k:,} 出来高", width=20 * 60 * 1000,
-                    marker_color=col, opacity=0.35, yaxis="y2", showlegend=False))
-            # 取引のない時間帯を詰める（昼: 6:00-8:45 / 夕: 15:45-17:00 / 週末）
-            breaks = [dict(bounds=[6, 8.75], pattern="hour"),
-                      dict(bounds=[15.75, 17], pattern="hour")]
+                    x=s_.bar, y=s_.dv, name=f"{k:,} 出来高", marker_color=col,
+                    opacity=0.35, yaxis="y2", showlegend=False))
+            if pre == "ex":
+                fig7.add_hline(y=0, line=dict(color="#888780", width=1, dash="dot"))
+            breaks = [dict(bounds=[6.25, 8.75], pattern="hour"),
+                      dict(bounds=[15.75, 16.5], pattern="hour")]
             if all(pd.Timestamp(f"{d[:4]}-{d[4:6]}-{d[6:8]}").weekday() < 5
-                   for d in intr_s.day.unique()):
+                   for d in ohlc.day.unique()):
                 breaks.append(dict(bounds=["sat", "mon"]))
-            fig7.update_layout(height=380, template="plotly_white",
-                               title=f"{_fmt_cm(cm_sel)} {ot_sel} IV 日内（直近{intra_n}取引日）"
-                                     "　棒=出来高（スナップショット間増分・右軸）",
-                               yaxis=dict(title="IV (%)"),
+            ytitle = "IV (%)" if pre == "iv" else "超過IV (%pt) = IV − ATM IV"
+            fig7.update_layout(height=420, template="plotly_white",
+                               title=f"{_fmt_cm(cm_sel)} {ot_sel} {mode} {freq_lab}足"
+                                     f"（直近{intra_n}取引日）　棒=足内出来高（右軸）",
+                               yaxis=dict(title=ytitle),
                                yaxis2=dict(title="出来高 (枚)", overlaying="y",
                                            side="right", showgrid=False,
                                            rangemode="tozero"),
                                barmode="overlay",
                                xaxis=dict(type="date", tickformat="%m/%d %H:%M",
-                                          dtick=3 * 60 * 60 * 1000,  # 3時間刻み
-                                          tickangle=-45, rangebreaks=breaks),
+                                          dtick=3 * 60 * 60 * 1000, tickangle=-45,
+                                          rangebreaks=breaks,
+                                          rangeslider=dict(visible=False)),
                                legend=dict(orientation="h", y=-0.45),
                                margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig7, use_container_width=True)
+            st.caption("各足は、足内のスナップショット（約15分間隔）の始値・高値・安値・終値。"
+                       "超過IV = 同時刻の行使価格IV − 同限月ATM IV（CALLデルタ0.5最近傍の実効IV）。")
 
 main()
