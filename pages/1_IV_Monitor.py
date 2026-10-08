@@ -267,37 +267,45 @@ def main() -> None:
                            "2026-07-12以前の収集分は4桁以上の建玉が下位桁欠落（既知欠陥）")
 
         c1, c2 = st.columns([3, 2])
-        mode = c1.radio("日内チャート", ["IV", "超過IV（IV − ATM IV）"], horizontal=True,
+        mode = c1.radio("日内チャート", ["IV", "累積超過ΔIV"], horizontal=True,
                         key="intra_mode")
         freq_lab = c2.radio("足", ["30分", "1時間", "2時間"], index=1, horizontal=True,
                             key="intra_freq")
         freq = {"30分": "30min", "1時間": "1h", "2時間": "2h"}[freq_lab]
         ohlc = _strike_ohlc(tuple(days_sel), intra_n, cm_sel, ot_sel, ck, freq)
         if len(ohlc):
-            pre = "iv" if mode == "IV" else "ex"
+            pre = "iv" if mode == "IV" else "e"
             fig7 = go.Figure()
             for mi, k in enumerate(chart_strikes):
-                s_ = ohlc[ohlc.strike == k].dropna(subset=[f"{pre}_c"])
+                s_ = ohlc[ohlc.strike == k]
+                s_ = s_.dropna(subset=["iv_c"]) if pre == "iv" else s_
                 if s_.empty:
                     continue
                 col = _COLORS[mi % len(_COLORS)]
-                # 陽線=塗り、陰線=白抜き。色は行使価格ごとに固定
-                fig7.add_trace(go.Candlestick(
-                    x=s_.bar, open=s_[f"{pre}_o"], high=s_[f"{pre}_h"],
-                    low=s_[f"{pre}_l"], close=s_[f"{pre}_c"], name=f"{k:,}",
-                    increasing=dict(line=dict(color=col, width=1), fillcolor=col),
-                    decreasing=dict(line=dict(color=col, width=1), fillcolor="white")))
+                if pre == "iv":
+                    # 陽線=塗り、陰線=白抜き。色は行使価格ごとに固定
+                    fig7.add_trace(go.Candlestick(
+                        x=s_.bar, open=s_.iv_o, high=s_.iv_h, low=s_.iv_l, close=s_.iv_c,
+                        name=f"{k:,}",
+                        increasing=dict(line=dict(color=col, width=1), fillcolor=col),
+                        decreasing=dict(line=dict(color=col, width=1), fillcolor="white")))
+                else:
+                    fig7.add_trace(go.Scatter(
+                        x=s_.bar, y=s_.e_cum, mode="lines", name=f"{k:,}",
+                        line=dict(color=col, width=1.6, shape="hv"),
+                        customdata=s_.e_sum,
+                        hovertemplate="%{x|%m/%d %H:%M} 累積 %{y:.2f} / 足内 %{customdata:.2f}"))
                 fig7.add_trace(go.Bar(
                     x=s_.bar, y=s_.dv, name=f"{k:,} 出来高", marker_color=col,
                     opacity=0.35, yaxis="y2", showlegend=False))
-            if pre == "ex":
+            if pre == "e":
                 fig7.add_hline(y=0, line=dict(color="#888780", width=1, dash="dot"))
             breaks = [dict(bounds=[6.25, 8.75], pattern="hour"),
                       dict(bounds=[15.75, 16.5], pattern="hour")]
             if all(pd.Timestamp(f"{d[:4]}-{d[4:6]}-{d[6:8]}").weekday() < 5
                    for d in ohlc.day.unique()):
                 breaks.append(dict(bounds=["sat", "mon"]))
-            ytitle = "IV (%)" if pre == "iv" else "超過IV (%pt) = IV − ATM IV"
+            ytitle = "IV (%)" if pre == "iv" else "累積超過ΔIV (%pt)"
             fig7.update_layout(height=420, template="plotly_white",
                                title=f"{_fmt_cm(cm_sel)} {ot_sel} {mode} {freq_lab}足"
                                      f"（直近{intra_n}取引日）　棒=足内出来高（右軸）",
@@ -313,7 +321,8 @@ def main() -> None:
                                legend=dict(orientation="h", y=-0.45),
                                margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig7, use_container_width=True)
-            st.caption("各足は、足内のスナップショット（約15分間隔）の始値・高値・安値・終値。"
-                       "超過IV = 同時刻の行使価格IV − 同限月ATM IV（CALLデルタ0.5最近傍の実効IV）。")
+            st.caption("IV: 足内スナップショット（約15分間隔）の始値・高値・安値・終値。"
+                       "累積超過ΔIV: e(t) = ΔIV_k(t, t−1) − L(t) を窓の起点から累積。"
+                       "L(t) = 同限月の全行使（PUT/CALL、両気配）の固定行使ΔIV(t, t−1)の中央値で、表の超過ΔIVと同じ定義。")
 
 main()

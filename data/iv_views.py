@@ -235,6 +235,7 @@ def _month_reduced(key: str, cm: str) -> pd.DataFrame | None:
         if not gm.empty:
             atm = _atm_row(gm)
             out = gm[["option_type", "strike", "eff_iv", "volume"]].copy()
+            out["q"] = gm.ask_iv.notna() & gm.bid_iv.notna()  # 両気配
             out["atm"] = None if atm is None else atm.eff_iv
     if len(_REDUCED) > 6000:
         _REDUCED.clear()
@@ -264,6 +265,23 @@ def strike_intraday_ohlc(days: list[str], n_days: int, cm: str, option_type: str
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(8) as ex:
         reduced = list(ex.map(lambda dk: _month_reduced(dk[1], cm), keys))
+    # 地合い L(t) = 同限月・全行使（PUT/CALL）の固定行使 ΔIV(t, t−1) の中央値。
+    # 母集団は t と t−1 の両方で両気配の銘柄（5未満なら IV のある全銘柄）。表の超過ΔIVと同じ定義。
+    lvl: dict[str, float] = {}
+    prev = None
+    for (d, key), gm in zip(keys, reduced):
+        if gm is None:
+            continue
+        cur = gm.dropna(subset=["eff_iv"]).set_index(["option_type", "strike"])
+        cur = cur[~cur.index.duplicated()]
+        if prev is not None:
+            j = cur.join(prev, rsuffix="_p", how="inner")
+            dd = (j.eff_iv - j.eff_iv_p) * 100.0
+            pool = dd[j.q & j.q_p]
+            pool = pool if len(pool) >= 5 else dd
+            if len(pool):
+                lvl[key] = float(pool.median())
+        prev = cur
     parts = []
     for (d, key), gm in zip(keys, reduced):
         if gm is None:
@@ -274,6 +292,7 @@ def strike_intraday_ohlc(days: list[str], n_days: int, cm: str, option_type: str
             continue
         g["ts"] = pd.Timestamp(f"{d[:4]}-{d[4:6]}-{d[6:8]} {key_time_label(key)}")
         g["day"] = d
+        g["lvl"] = lvl.get(key)
         parts.append(g)
     if not parts:
         return pd.DataFrame()
@@ -284,12 +303,15 @@ def strike_intraday_ohlc(days: list[str], n_days: int, cm: str, option_type: str
     r = r.sort_values(["strike", "ts"])
     dv = r.groupby(["strike", "day"]).volume.diff()
     r["dv"] = dv.where(dv >= 0, r.volume).fillna(r.volume)
+    # 超過ΔIV e_k(t) = ΔIV_k(t, t−1) − L(t)  [%pt]（直前スナップショットとの差。窓の先頭は欠損）
+    r["e"] = r.groupby("strike").iv.diff() - pd.to_numeric(r.lvl, errors="coerce")
     r["bar"] = r.ts.dt.floor(freq)
     agg = r.groupby(["strike", "bar"]).agg(
         day=("day", "first"),
         iv_o=("iv", "first"), iv_h=("iv", "max"), iv_l=("iv", "min"), iv_c=("iv", "last"),
         ex_o=("ex", "first"), ex_h=("ex", "max"), ex_l=("ex", "min"), ex_c=("ex", "last"),
-        dv=("dv", "sum"), n=("ts", "size")).reset_index()
+        e_sum=("e", "sum"), dv=("dv", "sum"), n=("ts", "size")).reset_index()
+    agg["e_cum"] = agg.groupby("strike").e_sum.cumsum()  # 窓の起点からの累積超過ΔIV
     return agg
 
 
