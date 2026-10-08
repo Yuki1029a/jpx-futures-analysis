@@ -220,6 +220,7 @@ def strike_intraday_series(days: list[str], n_days: int, cm: str, option_type: s
 
 
 _REDUCED: dict[tuple[str, str], pd.DataFrame | None] = {}
+_MIN_TWO_SIDED = 100  # 日中・夜間の通常時は 250-400 銘柄が両気配
 
 
 def _month_reduced(key: str, cm: str) -> pd.DataFrame | None:
@@ -259,14 +260,18 @@ def strike_intraday_ohlc(days: list[str], n_days: int, cm: str, option_type: str
     if not days:
         return pd.DataFrame()
     anchor = days[-1]
-    tdays = [d for d in days if d == anchor or _is_trading_day(d)][-n_days:]
+    # 1日多く読み、表示初日の最初の e にも直前（前日引け）のスナップショットを使う
+    tdays = [d for d in days if d == anchor or _is_trading_day(d)][-(n_days + 1):]
     keys = [(d, k) for d in tdays for k in snapshot_keys(d)]
     prefetch_snapshots([k for _, k in keys])
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(8) as ex:
         reduced = list(ex.map(lambda dk: _month_reduced(dk[1], cm), keys))
+    # 板が薄いスナップショット（引け後・夜間寄り前後。両気配が数十銘柄以下）は
+    # IVが清算値ベースに置き換わり水準が不連続になるため除外する
+    reduced = [g if g is not None and int(g.q.sum()) >= _MIN_TWO_SIDED else None for g in reduced]
     # 地合い L(t) = 同限月・全行使（PUT/CALL）の固定行使 ΔIV(t, t−1) の中央値。
-    # 母集団は t と t−1 の両方で両気配の銘柄（5未満なら IV のある全銘柄）。表の超過ΔIVと同じ定義。
+    # 母集団は t と t−1 の両方で両気配の銘柄（5未満なら L は欠損）。表の超過ΔIVと同じ定義。
     lvl: dict[str, float] = {}
     prev = None
     for (d, key), gm in zip(keys, reduced):
@@ -278,8 +283,7 @@ def strike_intraday_ohlc(days: list[str], n_days: int, cm: str, option_type: str
             j = cur.join(prev, rsuffix="_p", how="inner")
             dd = (j.eff_iv - j.eff_iv_p) * 100.0
             pool = dd[j.q & j.q_p]
-            pool = pool if len(pool) >= 5 else dd
-            if len(pool):
+            if len(pool) >= 5:
                 lvl[key] = float(pool.median())
         prev = cur
     parts = []
@@ -305,13 +309,17 @@ def strike_intraday_ohlc(days: list[str], n_days: int, cm: str, option_type: str
     r["dv"] = dv.where(dv >= 0, r.volume).fillna(r.volume)
     # 超過ΔIV e_k(t) = ΔIV_k(t, t−1) − L(t)  [%pt]（直前スナップショットとの差。窓の先頭は欠損）
     r["e"] = r.groupby("strike").iv.diff() - pd.to_numeric(r.lvl, errors="coerce")
+    # 取引日 = 16:00以降のスナップショットは翌平日扱い（夜間セッションは翌取引日に属する）
+    nxt = r.ts.dt.normalize() + pd.offsets.BDay(1)
+    r["tdate"] = r.ts.dt.normalize().where(r.ts.dt.hour < 16, nxt)
+    r = r[r.tdate.isin(sorted(r.tdate.unique())[-n_days:])]
     r["bar"] = r.ts.dt.floor(freq)
     agg = r.groupby(["strike", "bar"]).agg(
-        day=("day", "first"),
+        day=("day", "first"), tdate=("tdate", "first"),
         iv_o=("iv", "first"), iv_h=("iv", "max"), iv_l=("iv", "min"), iv_c=("iv", "last"),
         ex_o=("ex", "first"), ex_h=("ex", "max"), ex_l=("ex", "min"), ex_c=("ex", "last"),
         e_sum=("e", "sum"), dv=("dv", "sum"), n=("ts", "size")).reset_index()
-    agg["e_cum"] = agg.groupby("strike").e_sum.cumsum()  # 窓の起点からの累積超過ΔIV
+    agg["e_cum"] = agg.groupby(["strike", "tdate"]).e_sum.cumsum()  # 取引日ごとに前日引け=0から累積
     return agg
 
 

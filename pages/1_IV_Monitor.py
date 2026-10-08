@@ -275,54 +275,58 @@ def main() -> None:
         ohlc = _strike_ohlc(tuple(days_sel), intra_n, cm_sel, ot_sel, ck, freq)
         if len(ohlc):
             pre = "iv" if mode == "IV" else "e"
-            fig7 = go.Figure()
-            for mi, k in enumerate(chart_strikes):
-                s_ = ohlc[ohlc.strike == k]
-                s_ = s_.dropna(subset=["iv_c"]) if pre == "iv" else s_
-                if s_.empty:
-                    continue
-                col = _COLORS[mi % len(_COLORS)]
-                if pre == "iv":
-                    # 陽線=塗り、陰線=白抜き。色は行使価格ごとに固定
-                    fig7.add_trace(go.Candlestick(
-                        x=s_.bar, open=s_.iv_o, high=s_.iv_h, low=s_.iv_l, close=s_.iv_c,
-                        name=f"{k:,}",
-                        increasing=dict(line=dict(color=col, width=1), fillcolor=col),
-                        decreasing=dict(line=dict(color=col, width=1), fillcolor="white")))
-                else:
-                    fig7.add_trace(go.Scatter(
-                        x=s_.bar, y=s_.e_cum, mode="lines", name=f"{k:,}",
-                        line=dict(color=col, width=1.6, shape="hv"),
-                        customdata=s_.e_sum,
-                        hovertemplate="%{x|%m/%d %H:%M} 累積 %{y:.2f} / 足内 %{customdata:.2f}"))
-                fig7.add_trace(go.Bar(
-                    x=s_.bar, y=s_.dv, name=f"{k:,} 出来高", marker_color=col,
-                    opacity=0.35, yaxis="y2", showlegend=False))
-            if pre == "e":
-                fig7.add_hline(y=0, line=dict(color="#888780", width=1, dash="dot"))
-            breaks = [dict(bounds=[6.25, 8.75], pattern="hour"),
-                      dict(bounds=[15.75, 16.5], pattern="hour")]
-            if all(pd.Timestamp(f"{d[:4]}-{d[4:6]}-{d[6:8]}").weekday() < 5
-                   for d in ohlc.day.unique()):
-                breaks.append(dict(bounds=["sat", "mon"]))
-            ytitle = "IV (%)" if pre == "iv" else "累積超過ΔIV (%pt)"
-            fig7.update_layout(height=420, template="plotly_white",
-                               title=f"{_fmt_cm(cm_sel)} {ot_sel} {mode} {freq_lab}足"
-                                     f"（直近{intra_n}取引日）　棒=足内出来高（右軸）",
-                               yaxis=dict(title=ytitle),
-                               yaxis2=dict(title="出来高 (枚)", overlaying="y",
-                                           side="right", showgrid=False,
-                                           rangemode="tozero"),
-                               barmode="overlay",
-                               xaxis=dict(type="date", tickformat="%m/%d %H:%M",
-                                          dtick=3 * 60 * 60 * 1000, tickangle=-45,
-                                          rangebreaks=breaks,
-                                          rangeslider=dict(visible=False)),
-                               legend=dict(orientation="h", y=-0.45),
-                               margin=dict(l=0, r=0, t=30, b=0))
-            st.plotly_chart(fig7, use_container_width=True)
-            st.caption("IV: 足内スナップショット（約15分間隔）の始値・高値・安値・終値。"
+            for ci in range(0, len(chart_strikes), 3):  # 1グラフ3行使まで
+                grp = chart_strikes[ci:ci + 3]
+                fig7 = go.Figure()
+                for mi, k in enumerate(grp, start=ci):
+                    s_ = ohlc[ohlc.strike == k]
+                    s_ = s_.dropna(subset=["iv_c"]) if pre == "iv" else s_
+                    if s_.empty:
+                        continue
+                    col = _COLORS[mi % len(_COLORS)]
+                    if pre == "iv":
+                        # 陽線=塗り、陰線=白抜き。色は行使価格ごとに固定
+                        fig7.add_trace(go.Candlestick(
+                            x=s_.bar, open=s_.iv_o, high=s_.iv_h, low=s_.iv_l, close=s_.iv_c,
+                            name=f"{k:,}",
+                            increasing=dict(line=dict(color=col, width=1), fillcolor=col),
+                            decreasing=dict(line=dict(color=col, width=1), fillcolor="white")))
+                    else:
+                        fig7.add_trace(go.Scatter(
+                            x=s_.bar, y=s_.e_cum, mode="lines", name=f"{k:,}",
+                            line=dict(color=col, width=1.6, shape="hv"),
+                            customdata=s_.e_sum,
+                            hovertemplate="%{x|%m/%d %H:%M} 累積 %{y:.2f} / 足内 %{customdata:.2f}"))
+                    fig7.add_trace(go.Bar(
+                        x=s_.bar, y=s_.dv, name=f"{k:,} 出来高", marker_color=col,
+                        opacity=0.35, yaxis="y2", showlegend=False))
+                if pre == "e":
+                    fig7.add_hline(y=0, line=dict(color="#888780", width=1, dash="dot"))
+                breaks = [dict(bounds=[6.25, 8.75], pattern="hour"),
+                          dict(bounds=[15.75, 16.5], pattern="hour")]
+                if all(pd.Timestamp(f"{d[:4]}-{d[4:6]}-{d[6:8]}").weekday() < 5
+                       for d in ohlc.day.unique()):
+                    breaks.append(dict(bounds=["sat", "mon"]))
+                ytitle = "IV (%)" if pre == "iv" else "累積超過ΔIV (%pt)"
+                fig7.update_layout(height=340, template="plotly_white",
+                                   title=f"{_fmt_cm(cm_sel)} {ot_sel} {mode} {freq_lab}足"
+                                         f"（直近{intra_n}取引日）{' / '.join(f'{k:,}' for k in grp)}",
+                                   yaxis=dict(title=ytitle),
+                                   yaxis2=dict(title="出来高 (枚)", overlaying="y",
+                                               side="right", showgrid=False,
+                                               rangemode="tozero"),
+                                   barmode="overlay",
+                                   xaxis=dict(type="date", tickformat="%m/%d %H:%M",
+                                              dtick=3 * 60 * 60 * 1000, tickangle=-45,
+                                              rangebreaks=breaks,
+                                              rangeslider=dict(visible=False)),
+                                   legend=dict(orientation="h", y=-0.45),
+                                   margin=dict(l=0, r=0, t=30, b=0))
+                st.plotly_chart(fig7, use_container_width=True)
+            st.caption("棒=足内出来高（右軸）。IV: 足内スナップショット（約15分間隔）の始値・高値・安値・終値。"
                        "累積超過ΔIV: e(t) = ΔIV_k(t, t−1) − L(t) を窓の起点から累積。"
-                       "L(t) = 同限月の全行使（PUT/CALL、両気配）の固定行使ΔIV(t, t−1)の中央値で、表の超過ΔIVと同じ定義。")
+                       "L(t) = 同限月の全行使（PUT/CALL、両気配）の固定行使ΔIV(t, t−1)の中央値で、表の超過ΔIVと同じ定義。"
+                       "累積は取引日（夜間16:30〜日中15:15）ごとに前取引日の最終値を0として開始。"
+                       "両気配100銘柄未満のスナップショット（引け後・夜間寄り前後）は除外。")
 
 main()
