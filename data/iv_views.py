@@ -428,6 +428,43 @@ def _level_judge(out: pd.DataFrame, lvl_q: list, lvl_all: list,
     return out, meta
 
 
+def _vw_excess(keys: list[str], cm: str) -> dict[tuple[str, int], float]:
+    """出来高加重の超過ΔIV（窓内のスナップショット列 keys、昇順）。
+
+      e_k(t)  = ΔIV_k(t, t−1) − L(t)            [%pt]（L は strike_intraday_ohlc と同じ中央値）
+      Δv_k(t) = 累積出来高の増分（減少＝取引日切替のリセット時はその値）
+      VW_k    = Σ_t e_k(t)·Δv_k(t) / Σ_t Δv_k(t)   （Σ Δv = 0 なら欠損）
+    売買が入った区間の IV の動きだけを集計する。両気配100銘柄未満のスナップショットは除外。
+    """
+    from data.qri_iv_loader import prefetch_snapshots
+    from concurrent.futures import ThreadPoolExecutor
+    prefetch_snapshots(keys)
+    with ThreadPoolExecutor(8) as ex:
+        red = list(ex.map(lambda k: _month_reduced(k, cm), keys))
+    num: dict = {}
+    den: dict = {}
+    prev = None
+    for g in red:
+        if g is None or int(g.q.sum()) < _MIN_TWO_SIDED:
+            continue
+        cur = g.set_index(["option_type", "strike"])
+        cur = cur[~cur.index.duplicated()]
+        if prev is not None:
+            j = cur.join(prev, rsuffix="_p", how="inner")
+            dd = (j.eff_iv - j.eff_iv_p) * 100.0
+            pool = dd[j.q & j.q_p].dropna()
+            if len(pool) >= 5:
+                e = dd - float(pool.median())
+                dv = (j.volume - j.volume_p)
+                dv = dv.where(dv >= 0, j.volume).fillna(0.0)
+                ok = e.notna() & (dv > 0)
+                for idx in e[ok].index:
+                    num[idx] = num.get(idx, 0.0) + float(e[idx] * dv[idx])
+                    den[idx] = den.get(idx, 0.0) + float(dv[idx])
+        prev = cur
+    return {(ot, int(k)): num[(ot, k)] / den[(ot, k)] for (ot, k) in num if den[(ot, k)] > 0}
+
+
 def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
     """Δ建玉×ΔIV quadrant per (strike, type)。
 
@@ -466,6 +503,8 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
         if cur_df.empty or prv_df.empty:
             continue
         ci, pi = _iv_slice(cur_df, cm), _iv_slice(prv_df, cm)
+        win = [k for k in snapshot_keys(prv_day) + snapshot_keys(d) if prv_kd[0] <= k <= cur_kd[0]]
+        vw = _vw_excess(win, cm)
         rows, lvl_q, lvl_all = [], [], []
         for _, r in jpx.iterrows():
             key = (r.option_type, int(r.strike))
@@ -482,6 +521,7 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
                 "oi": r.oi, "d_oi": r.d_oi,
                 "iv_pct": None if cv is None or pd.isna(cv) else float(cv) * 100.0,
                 "d_iv_pct": d_iv,
+                "vw_ex_pct": vw.get(key),
                 "volume": r.volume,
             })
         meta.update(source="jpx", trade_day=d, iv_days=(d, prv_day))

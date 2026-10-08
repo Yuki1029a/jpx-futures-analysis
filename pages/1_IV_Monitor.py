@@ -95,6 +95,10 @@ def main() -> None:
         st.stop()
     key = keys[-1]  # 最終スナップショット固定（日内推移は下のチャートで確認）
     df = _snapshot(key)
+    # SQ前日（最終取引日）の夜間以降、QRIは期近を一覧から外す。16:59以前の最終スナップショットも
+    # 読み、限月候補はその和集合、表示は選択限月を含むスナップショットを使う
+    day_keys = [k for k in keys if iv_views.key_time_label(k) <= "16:59:59"]
+    df_day = _snapshot(day_keys[-1]) if day_keys and day_keys[-1] != key else df
     if df.empty:
         st.warning("スナップショットを読み込めませんでした")
         st.stop()
@@ -112,7 +116,7 @@ def main() -> None:
     st.caption(f"最終スナップショット: {iv_views.key_time_label(key)}  |  "
                f"ソース更新: {upd.iloc[0] if len(upd) else '-'}  |  行数: {len(df):,}")
 
-    all_months = sorted(df.contract_month.unique())
+    all_months = sorted(set(df.contract_month.unique()) | set(df_day.contract_month.unique()))
     days_sel = [d for d in days if d <= day]  # 選択日をアンカーに過去方向のみ使用
 
     # ---------------- フロー判定（主機能） ----------------
@@ -129,6 +133,10 @@ def main() -> None:
     # 行使リストはスナップショットの全掲載行使から作る。
     # （夕場スナップショットはOI列が全欠損になるため、OIの有無で絞ると
     # 夜間閲覧時にセクションごと消える）
+    if cm_sel not in set(df.contract_month.unique()):
+        df = df_day
+        st.caption(f"{_fmt_cm(cm_sel)}は最終スナップショットに無いため、"
+                   f"{iv_views.key_time_label(day_keys[-1])}時点のスナップショットを表示")
     g_now = df[(df.contract_month == cm_sel) & (df.option_type == ot_sel)].copy()
     strike_opts = sorted(g_now.strike.astype(int).unique().tolist())
 
@@ -208,17 +216,23 @@ def main() -> None:
                "建玉増×IV上昇=新規買い / 建玉増×IV低下=新規売り / "
                "建玉減×IV上昇=買い戻し / 建玉減×IV低下=手仕舞い / "
                f"|超過ΔIV|<{iv_views._NEUTRAL_BAND}%ptは中立")
+    st.caption("出来高加重超過ΔIV = Σ e(t)·Δ出来高(t) ÷ Σ Δ出来高(t)。e(t) = 直前スナップショットからの"
+               "ΔIV − 同時点の地合い（限月内ΔIV中央値）。窓は超過ΔIVと同じで、売買が入った区間のIVの動きのみを集計"
+               "（判定には未使用）")
 
     # ---- Δ建玉 × 超過ΔIV 判定 ----
     if len(fl):
         # テーブルはΔ建玉が動いた全系列が母集団（IV欠損=判定不能も含める）
         tbl = fl[fl.d_oi.notna() & (fl.d_oi != 0)].copy()
+        if "vw_ex_pct" not in tbl.columns:  # QRIフォールバック時は未算出
+            tbl["vw_ex_pct"] = None
         tbl["judge"] = tbl.judge.where(tbl.judge != "", "判定不能(IV欠損)")
         show_fl = tbl.reindex(tbl.d_oi.abs().sort_values(ascending=False).index).head(15)
         show_fl = show_fl[["option_type", "strike", "oi", "d_oi", "volume",
-                           "iv_pct", "d_iv_pct", "d_iv_ex_pct", "judge"]]
+                           "iv_pct", "d_iv_pct", "d_iv_ex_pct", "vw_ex_pct", "judge"]]
         show_fl.columns = ["タイプ", "行使", "建玉", "Δ建玉", "出来高",
-                           "IV%", "ΔIV%pt", "超過ΔIV", "判定"]
+                           "IV%", "ΔIV%pt", "超過ΔIV", "出来高加重超過ΔIV", "判定"]
+        show_fl["出来高加重超過ΔIV"] = pd.to_numeric(show_fl["出来高加重超過ΔIV"], errors="coerce").round(2)
         show_fl["IV%"] = show_fl["IV%"].round(1)
         show_fl["ΔIV%pt"] = show_fl["ΔIV%pt"].round(2)
         show_fl["超過ΔIV"] = show_fl["超過ΔIV"].round(2)
