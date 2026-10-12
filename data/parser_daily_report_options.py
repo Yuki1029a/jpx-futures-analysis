@@ -51,7 +51,7 @@ _SECTIONS = {"プットオプション": "PUT", "コールオプション": "CAL
 _KNOWN_KIND = "取引成立銘柄"
 
 _DATE_RE = re.compile(r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日")
-_CONTRACT_RE = re.compile(r"^\d{6}$")
+_CONTRACT_RE = re.compile(r"^\d{6}(?:\d{2})?$")  # 週次（ミニ）は yyyymmdd
 _LASTDAY_RE = re.compile(r"^\d{2}\.\d{2}$")
 
 # ヘッダ語 → 列名。code/close/chg は誤割当防止用のダミー列
@@ -64,7 +64,7 @@ _HEADER_X_LIMIT = 120.0   # 商品名・市場区分・銘柄区分は x0 がこ
 _ROW_TOL = 3.0            # 同一行とみなす top の許容差 (pt)
 
 
-def parse_siop_pdf(content: bytes) -> tuple[date, list[dict]]:
+def parse_siop_pdf(content: bytes, product_name: str = _TARGET_PRODUCT) -> tuple[date, list[dict]]:
     """siop_dyr PDF から日経225オプション (ラージ) の銘柄別行を返す。
 
     Returns:
@@ -85,7 +85,7 @@ def parse_siop_pdf(content: bytes) -> tuple[date, list[dict]]:
             words = page.extract_words(x_tolerance=1.5)
             lines = _group_lines(words)
             product, market_jp, kind = _page_header(lines)
-            if product != _TARGET_PRODUCT or market_jp not in _MARKETS:
+            if product != product_name or market_jp not in _MARKETS:
                 continue
             if report_date is None:
                 report_date = _find_date(words)
@@ -115,7 +115,7 @@ def parse_siop_pdf(content: bytes) -> tuple[date, list[dict]]:
                     continue
                 cols = _assign_columns(line[2:], anchors)
                 rows.append({
-                    "contract_month": first[2:],
+                    "contract_month": first[2:],   # 月次 YYMM、ミニ（週次）は YYMMDD
                     "option_type": section,
                     "strike_price": _to_int(cols.get("strike")),
                     "trading_volume": _to_int(cols.get("volume")),
