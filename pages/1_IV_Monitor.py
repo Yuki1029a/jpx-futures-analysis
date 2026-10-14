@@ -306,8 +306,13 @@ def main() -> None:
                             increasing=dict(line=dict(color=col, width=1), fillcolor=col),
                             decreasing=dict(line=dict(color=col, width=1), fillcolor="white")))
                     else:
+                        # 取引日ごとに累積を0から始めるため、日の境目で線を切る（つなぐと全行使に同じ段差が出る）
+                        brk = s_.tdate.ne(s_.tdate.shift()) & (s_.index != s_.index[0])
+                        s_ = pd.concat([s_, s_[brk].assign(e_cum=None, e_sum=None,
+                                                           bar=s_.bar[brk] - pd.Timedelta(seconds=1))]
+                                       ).sort_values("bar")
                         fig7.add_trace(go.Scatter(
-                            x=s_.bar, y=s_.e_cum, mode="lines", name=f"{k:,}",
+                            x=s_.bar, y=s_.e_cum, mode="lines", name=f"{k:,}", connectgaps=False,
                             line=dict(color=col, width=1.6, shape="hv"),
                             customdata=s_.e_sum,
                             hovertemplate="%{x|%m/%d %H:%M} 累積 %{y:.2f} / 足内 %{customdata:.2f}"))
@@ -316,6 +321,8 @@ def main() -> None:
                         opacity=0.35, yaxis="y2", showlegend=False))
                 if pre == "e":
                     fig7.add_hline(y=0, line=dict(color="#888780", width=1, dash="dot"))
+                    for b0 in ohlc.groupby("tdate").bar.min().sort_values().iloc[1:]:
+                        fig7.add_vline(x=b0, line=dict(color="#b4b2a9", width=1, dash="dot"))  # 取引日の境目（累積を0に戻す）
                 breaks = [dict(bounds=[6.25, 8.75], pattern="hour"),
                           dict(bounds=[15.75, 16.5], pattern="hour")]
                 if all(pd.Timestamp(f"{d[:4]}-{d[4:6]}-{d[6:8]}").weekday() < 5
