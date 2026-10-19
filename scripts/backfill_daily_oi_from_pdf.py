@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
 from data import fetcher  # noqa: E402
 from data.cache import ensure_cache_dirs, save_to_cache  # noqa: E402
-from data.parser_daily_oi import parse_daily_futures_oi_excel, parse_daily_oi_excel  # noqa: E402
+from data.parser_daily_oi import parse_daily_futures_oi_excel, parse_daily_mini_oi_excel, parse_daily_oi_excel  # noqa: E402
 from data.parser_daily_report_futures import parse_sif_pdf  # noqa: E402
 from data.parser_daily_report_options import parse_siop_pdf  # noqa: E402
 from data.parser_market_data import parse_op_market_data  # noqa: E402
@@ -126,7 +126,7 @@ def list_report_days(start: date, end: date) -> list[date]:
     return sorted(x for x in days if start <= x <= end)
 
 
-def parse_zip(d: date) -> tuple[list[dict], list[dict]] | None:
+def parse_zip(d: date) -> tuple[list[dict], list[dict], list[dict]] | None:
     """日報 → (先物行, 日経225オプション行)。新形式zip、無ければ旧形式PDF。未公表は None。"""
     ds = d.strftime("%Y%m%d")
     z = get_zip(d)
@@ -143,7 +143,8 @@ def parse_zip(d: date) -> tuple[list[dict], list[dict]] | None:
     d2, opt = parse_siop_pdf(siop)
     if d1 != d or d2 != d:
         raise ValueError(f"PDF日付不一致: {d} sif={d1} siop={d2}")
-    return fut, opt
+    _, mini = parse_siop_pdf(siop, "日経225ミニオプション")  # 週次満期。PDF の日付は SQ 日（別紙2 は最終取引日 = SQ 前日）
+    return fut, opt, mini
 
 
 def _first_fut(content: bytes) -> dict:
@@ -162,7 +163,7 @@ def _cm_label(cm: str) -> str:
     return f"{2000 + int(cm[:2])}年{cm[2:]}月限"
 
 
-def build_oi_xlsx(d: date, fut: list[dict], opt: list[dict], prev: bytes | None) -> bytes:
+def build_oi_xlsx(d: date, fut: list[dict], opt: list[dict], prev: bytes | None, mini: list[dict] | None = None) -> bytes:
     """建玉残高表xlsxを復元（sheet0=先物、別紙1=日経225オプション、別紙2=空）。"""
     pf = _first_fut(prev) if prev else {}
     po = _opt_map(prev) if prev else {}
@@ -237,9 +238,37 @@ def build_oi_xlsx(d: date, fut: list[dict], opt: list[dict], prev: bytes | None)
         ws1.cell(row, c0, lab)
         for j, v in enumerate(tot):
             ws1.cell(row, c0 + 1 + j, v)
+    # 別紙2: 日経225ミニオプション（週次満期）。コードの日付は最終取引日（PDF の yyyymmdd = SQ 日 → 前日）
     ws2 = wb.create_sheet("別紙2")
-    ws2["A1"] = "JPX デリバティブ建玉残高状況（別紙2）" + TAG + "※未復元"
+    ws2["A1"] = "JPX デリバティブ建玉残高状況（別紙2）" + TAG
     ws2["A2"] = datetime(d.year, d.month, d.day)
+    ws2["A5"], ws2["G5"] = "＜日経225ミニオプション（プット）＞", "＜日経225ミニオプション（コール）＞"
+    for i, h in enumerate(HDR):
+        ws2.cell(6, 1 + i, h)
+        ws2.cell(6, 7 + i, h)
+    pm = {(r.contract_month, r.option_type, r.strike_price): r for r in parse_daily_mini_oi_excel(prev)} if prev else {}
+    agg2: dict[tuple[str, str, int], list] = {}
+    for r in mini or []:
+        cm6 = r["contract_month"]
+        sq = datetime(2000 + int(cm6[:2]), int(cm6[2:4]), int(cm6[4:6])); last = (sq - timedelta(days=1)).strftime("%y%m%d")
+        k = (last, r["option_type"], int(r["strike_price"]))
+        a = agg2.setdefault(k, [0, None])
+        a[0] += int(r["trading_volume"] or 0)
+        if r["market"] == "auction" or a[1] is None:
+            a[1] = int(r["open_interest"] or 0)
+    near6 = sorted({k[0] for k, a in agg2.items() if a[1]})[:6]  # 実ファイルは直近 6 満期のみ掲載
+    keys2 = {k for k in set(agg2) | set(pm) if k[0] in near6}
+    for ot, c0 in (("PUT", 1), ("CALL", 7)):
+        row = 7
+        for k in sorted(k for k in keys2 if k[1] == ot):
+            vol, oi = agg2.get(k, [0, 0]); oi = oi or 0
+            prev_oi = pm[k].current_oi if k in pm else 0
+            if not (vol or oi or prev_oi):
+                continue
+            ws2.cell(row, c0, f"NK225 MINI {ot[0]}{k[0]}-{k[2]}")
+            for j, v in enumerate([vol, oi, oi - prev_oi, prev_oi]):
+                ws2.cell(row, c0 + 1 + j, v)
+            row += 1
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -286,7 +315,7 @@ def _prev_file(d: date, built: dict[date, bytes]) -> tuple[date, bytes] | None:
 
 
 def backfill(dates: list[date], out_dir: Path, upload: bool, force: bool = False,
-             seed: int = 0) -> dict[date, bytes]:
+             seed: int = 0, force_oi: bool = False) -> dict[date, bytes]:
     """seed: 先頭 seed 日は前日建玉の起点として復元のみ行い保存しない。"""
     ensure_cache_dirs()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -296,7 +325,7 @@ def backfill(dates: list[date], out_dir: Path, upload: bool, force: bool = False
         up = upload and i >= seed
         oi_fn = config.DAILY_OI_FILENAME.format(yyyymmdd=ds)
         md_fn = config.MARKET_DATA_FILENAME.format(yyyymmdd=ds, session="whole_day")
-        need_oi = force or fetcher._cached_any(oi_fn, config.CACHE_DAILY_OI_DIR, 24 * 3650) is None
+        need_oi = force or force_oi or fetcher._cached_any(oi_fn, config.CACHE_DAILY_OI_DIR, 24 * 3650) is None
         need_md = force or fetcher.cached_market_data_excel(d) is None
         if not (need_oi or need_md):
             print(f"{ds}: 実ファイルあり、スキップ")
@@ -305,10 +334,10 @@ def backfill(dates: list[date], out_dir: Path, upload: bool, force: bool = False
         if parsed is None:
             print(f"{ds}: 日報zip未公表")
             continue
-        fut, opt = parsed
+        fut, opt, mini = parsed
         if need_oi:
             prev = _prev_file(d, built)
-            oi_x = build_oi_xlsx(d, fut, opt, prev[1] if prev else None)
+            oi_x = build_oi_xlsx(d, fut, opt, prev[1] if prev else None, mini)
             built[d] = oi_x
             (out_dir / oi_fn).write_bytes(oi_x)
             print(f"{ds}: 建玉復元 prev={prev[0] if prev else None} "
@@ -338,8 +367,12 @@ def selftest(out_dir: Path) -> None:
     f6 = {c for _, c in LEFT + RIGHT}
     d29 = date(2026, 9, 29)
     real29 = fetcher.download_daily_oi_excel(d29)
-    fut29, opt29 = parse_zip(d29)
-    built29 = build_oi_xlsx(d29, fut29, opt29, _prev_file(d29, {})[1])
+    fut29, opt29, mini29 = parse_zip(d29)
+    built29 = build_oi_xlsx(d29, fut29, opt29, _prev_file(d29, {})[1], mini29)
+    mb, mr = parse_daily_mini_oi_excel(built29), parse_daily_mini_oi_excel(real29)
+    km = lambda rs: {(r.contract_month, r.option_type, r.strike_price): r for r in rs}
+    n, bad = _cmp(km(mb), km(mr))
+    print(f"(a) 9/29 別紙2 ミニ {n}件比較 不一致{len(bad)}", bad[:5])
     n, bad = _cmp({k: v for k, v in _first_fut(built29).items() if k[0] in f6},
                   {k: v for k, v in _first_fut(real29).items() if k[0] in f6})
     print(f"(a) 9/29 先物 {n}件比較 不一致{len(bad)}", bad[:5])
@@ -348,7 +381,7 @@ def selftest(out_dir: Path) -> None:
     t_b = next(r for r in parse_op_market_data(build_market_xlsx(d29, opt29)) if "合計" in r["session"])
     t_r = next(r for r in parse_op_market_data(fetcher.cached_market_data_excel(d29)) if "合計" in r["session"])
     print("(a) 9/29 取引概況 不一致:", {k: (t_b[k], t_r[k]) for k in t_r if k != "session" and t_b.get(k) != t_r[k]})
-    built = backfill([date(2026, 9, 30), date(2026, 10, 1)], out_dir, upload=False)
+    built = backfill([date(2026, 9, 30), date(2026, 10, 1)], out_dir, upload=False, force_oi=True)
     b01, r02 = built[date(2026, 10, 1)], fetcher.download_daily_oi_excel(date(2026, 10, 2))
     fa, fb = _first_fut(b01), _first_fut(r02)
     ks = [k for k in fa.keys() & fb.keys() if k[0] in f6]
@@ -366,6 +399,7 @@ if __name__ == "__main__":
     ap.add_argument("dates", nargs="*", help="yyyymmdd")
     ap.add_argument("--upload", action="store_true")
     ap.add_argument("--force", action="store_true", help="実ファイルがあっても上書き")
+    ap.add_argument("--force-oi", action="store_true", help="建玉残高表だけ作り直す（取引概況は実ファイルを保持）")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--range", nargs=2, metavar=("START", "END"), help="yyyymmdd yyyymmdd（日報公表日のみ）")
     ap.add_argument("--seed", type=int, default=0, help="先頭N日は保存しない（前日建玉の起点）")
@@ -378,4 +412,4 @@ if __name__ == "__main__":
         ds = [datetime.strptime(x, "%Y%m%d").date() for x in a.dates]
         if a.range:
             ds += list_report_days(*[datetime.strptime(x, "%Y%m%d").date() for x in a.range])
-        backfill(sorted(set(ds)), Path(a.out), a.upload, a.force, a.seed)
+        backfill(sorted(set(ds)), Path(a.out), a.upload, a.force, a.seed, a.force_oi)
