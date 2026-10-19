@@ -14,8 +14,10 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def in_session(now: datetime) -> bool:
     m, dow = now.hour * 60 + now.minute, now.weekday()  # 0=月 … 6=日
-    day = dow <= 4 and 8 * 60 + 45 <= m <= 15 * 60 + 30
-    eve = dow <= 4 and m >= 16 * 60 + 30
+    # 日中立会 08:45-15:45（配信が15分遅延のため、引け気配を取るには 16:15 まで取得を続ける）
+    # 夜間立会 17:00-翌06:00（同じく 06:15 まで）。16:15-17:00 は板が消えるため取得しない
+    day = dow <= 4 and 8 * 60 + 45 <= m <= 16 * 60 + 15
+    eve = dow <= 4 and m >= 17 * 60
     morning = 1 <= dow <= 5 and m <= 6 * 60 + 15
     return day or eve or morning
 
