@@ -28,7 +28,7 @@ import re
 import sys
 import time
 import tomllib
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -48,6 +48,11 @@ _DEFAULT_MAX_INDEX = 8  # probe /0../7 by default; stop on first failure
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _OUT_ROOT = _PROJECT_ROOT / "cache" / "qri_iv" / "raw"
 _R2_PREFIX = "qri_iv/raw"  # R2 key prefix
+# 日経225ミニオプション（週次満期: 水曜・金曜 SQ）。ページ構成は月次と同じで /jpx/nkopmini/, /1, /2, ... が満期順。
+_BASE_MINI = "https://svc.qri.jp/jpx/nkopmini/"
+_R2_PREFIX_MINI = "qri_iv_mini/raw"
+_OUT_ROOT_MINI = _PROJECT_ROOT / "cache" / "qri_iv_mini" / "raw"
+_DEFAULT_MAX_INDEX_MINI = 8
 
 logger = logging.getLogger("fetch_qri_iv")
 
@@ -128,10 +133,10 @@ def _r2_put(key: str, content: bytes) -> bool:
 # HTTP
 # ---------------------------------------------------------------------------
 
-def _fetch_html(index: int, timeout: int = 30) -> Optional[str]:
+def _fetch_html(index: int, timeout: int = 30, base: str = _BASE) -> Optional[str]:
     """GET the per-month HTML. Returns text or None on failure / not-found."""
     suffix = "" if index == 0 else str(index)
-    url = _BASE + suffix
+    url = base + suffix
     try:
         r = requests.get(
             url,
@@ -218,7 +223,24 @@ def _parse_qty_bracket(s: str) -> tuple[Optional[float], Optional[float]]:
     return _num(m.group(1)), _num(m.group(2))
 
 
-def _parse_contract_month_label(soup: BeautifulSoup) -> str:
+def _parse_contract_month_label(soup: BeautifulSoup, product: str = "monthly") -> str:
+    """月次: 限月 YYMM。ミニ（週次）: アクティブタブ「10月23日(金曜)」= SQ 日 → 最終取引日（前日）を YYMMDD で返す
+    （JPX 建玉残高表 別紙2 の銘柄コード NK225 MINI P261022-64000 と同じ日付規約）。
+    """
+    if product == "mini":
+        tab_div = soup.select_one("#futuresContractTab"); active = tab_div.select_one("li.active") if tab_div else None
+        txt = active.get_text(strip=True) if active else ""
+        m = re.search(r"(\d{1,2})月(\d{1,2})日", txt)
+        if not m:
+            return ""
+        today = date.today(); mo, dd = int(m.group(1)), int(m.group(2))
+        year = today.year + 1 if mo < today.month else today.year
+        last = date(year, mo, dd) - timedelta(days=1)
+        return last.strftime("%y%m%d")
+    return _parse_contract_month_label_monthly(soup)
+
+
+def _parse_contract_month_label_monthly(soup: BeautifulSoup) -> str:
     """Extract the OPTION contract month (YYMM) from the active tab.
 
     Page layout:
@@ -304,13 +326,13 @@ def _extract_greeks(greek_tr) -> tuple[dict, dict]:
     return out_put, out_call
 
 
-def parse_page(html: str, *, fetch_time: datetime) -> list[dict]:
+def parse_page(html: str, *, fetch_time: datetime, product: str = "monthly") -> list[dict]:
     """Parse one contract month page into a list of per-strike records.
 
     Each <tr.row-num> yields TWO records (one PUT, one CALL).
     """
     soup = BeautifulSoup(html, "html.parser")
-    cm_label = _parse_contract_month_label(soup)
+    cm_label = _parse_contract_month_label(soup, product)
     update_time = _parse_update_time(soup)
 
     records: list[dict] = []
@@ -422,6 +444,10 @@ def parse_page(html: str, *, fetch_time: datetime) -> list[dict]:
             "vega": put_greeks.get("vega"),
         })
 
+    for r in records:
+        r["product"] = product
+        if product == "mini" and cm_label:
+            r["expiry_sq"] = (date(2000 + int(cm_label[:2]), int(cm_label[2:4]), int(cm_label[4:6])) + timedelta(days=1)).strftime("%Y-%m-%d")
     return records
 
 
@@ -429,75 +455,92 @@ def parse_page(html: str, *, fetch_time: datetime) -> list[dict]:
 # Driver
 # ---------------------------------------------------------------------------
 
-def run_once(
-    max_index: int = _DEFAULT_MAX_INDEX,
-    out_root: Path = _OUT_ROOT,
-    *,
-    save_local: bool = True,
-    save_r2: bool = False,
-) -> Optional[str]:
-    """Single fetch over all available months.
-
-    Returns a descriptive output location string, or None if nothing fetched.
-    """
-    fetch_time = datetime.now()
-    all_records: list[dict] = []
+def _fetch_product(base: str, max_index: int, fetch_time: datetime, product: str) -> list[dict]:
+    """/base, /base1, /base2, ... を順に取得。2 回続けて無ければ打ち切る。"""
+    records: list[dict] = []
     consecutive_misses = 0
     for idx in range(max_index):
-        html = _fetch_html(idx)
+        html = _fetch_html(idx, base=base)
         if html is None:
             consecutive_misses += 1
-            # 2 misses in a row → assume no more months to probe
             if consecutive_misses >= 2 and idx > 0:
                 break
             continue
         consecutive_misses = 0
-        recs = parse_page(html, fetch_time=fetch_time)
-        logger.info("idx=%d → %d records", idx, len(recs))
-        all_records.extend(recs)
+        recs = parse_page(html, fetch_time=fetch_time, product=product)
+        logger.info("%s idx=%d → %d records", product, idx, len(recs))
+        records.extend(recs)
         time.sleep(1.0)  # gentle pacing
+    return records
 
-    if not all_records:
-        logger.warning("No records fetched")
-        return None
 
-    df = pd.DataFrame(all_records)
-
-    # Serialize to parquet bytes once, reuse for both sinks
+def _save_records(records: list[dict], fetch_time: datetime, out_root: Path, r2_prefix: str,
+                  save_local: bool, save_r2: bool) -> list[str]:
+    df = pd.DataFrame(records)
     buf = io.BytesIO()
     df.to_parquet(buf, index=False)
     parquet_bytes = buf.getvalue()
-
     day = fetch_time.strftime("%Y%m%d")
     stamp = fetch_time.strftime("%Y%m%d_%H%M%S")
     rel_key = f"{day}/{stamp}.parquet"
     locations = []
-
     if save_local:
         day_dir = out_root / day
         day_dir.mkdir(parents=True, exist_ok=True)
         fpath = day_dir / f"{stamp}.parquet"
         fpath.write_bytes(parquet_bytes)
         locations.append(str(fpath))
-
     if save_r2:
-        r2_key = f"{_R2_PREFIX}/{rel_key}"
+        r2_key = f"{r2_prefix}/{rel_key}"
         if _r2_put(r2_key, parquet_bytes):
             locations.append(f"r2://{_r2_bucket}/{r2_key}")
         else:
             logger.warning("R2 upload failed for %s", r2_key)
-
     logger.info("Wrote %d records → %s", len(df), " , ".join(locations) or "(nowhere!)")
+    return locations
+
+
+def run_once(
+    max_index: int = _DEFAULT_MAX_INDEX,
+    out_root: Path = _OUT_ROOT,
+    *,
+    save_local: bool = True,
+    save_r2: bool = False,
+    mini: bool = True,
+    max_index_mini: int = _DEFAULT_MAX_INDEX_MINI,
+) -> Optional[str]:
+    """Single fetch over all available months (and, if mini=True, all mini/weekly expiries).
+
+    月次は qri_iv/raw/、ミニは qri_iv_mini/raw/ に別ファイルで保存する（既存の月次利用側を壊さないため）。
+    Returns a descriptive output location string, or None if nothing fetched.
+    """
+    fetch_time = datetime.now()
+    locations: list[str] = []
+    monthly = _fetch_product(_BASE, max_index, fetch_time, "monthly")
+    if monthly:
+        locations += _save_records(monthly, fetch_time, out_root, _R2_PREFIX, save_local, save_r2)
+    else:
+        logger.warning("No records fetched")
+    if mini:
+        try:
+            recs = _fetch_product(_BASE_MINI, max_index_mini, fetch_time, "mini")
+            if recs:
+                out_mini = _OUT_ROOT_MINI if out_root == _OUT_ROOT else out_root.parent / "qri_iv_mini" / "raw"
+                locations += _save_records(recs, fetch_time, out_mini, _R2_PREFIX_MINI, save_local, save_r2)
+            else:
+                logger.warning("No mini records fetched")
+        except Exception as e:
+            logger.exception("mini fetch failed: %s", e)
     return " , ".join(locations) if locations else None
 
 
 def run_loop(interval_min: int, max_index: int, out_root: Path,
-             save_local: bool, save_r2: bool):
+             save_local: bool, save_r2: bool, mini: bool = True):
     while True:
         start = time.time()
         try:
             run_once(max_index=max_index, out_root=out_root,
-                     save_local=save_local, save_r2=save_r2)
+                     save_local=save_local, save_r2=save_r2, mini=mini)
         except Exception as e:
             logger.exception("run_once failed: %s", e)
         elapsed = time.time() - start
@@ -516,6 +559,7 @@ def main():
     p.add_argument("--r2", action="store_true", help="Upload parquet to Cloudflare R2")
     p.add_argument("--no-local", action="store_true",
                    help="Skip local file write (use with --r2)")
+    p.add_argument("--no-mini", action="store_true", help="Skip Nikkei 225 mini (weekly) options")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -531,9 +575,9 @@ def main():
         sys.exit(2)
 
     if args.loop:
-        run_loop(args.interval, args.max, args.out, save_local, save_r2)
+        run_loop(args.interval, args.max, args.out, save_local, save_r2, mini=not args.no_mini)
     else:
-        path = run_once(args.max, args.out, save_local=save_local, save_r2=save_r2)
+        path = run_once(args.max, args.out, save_local=save_local, save_r2=save_r2, mini=not args.no_mini)
         if path is None:
             sys.exit(1)
 

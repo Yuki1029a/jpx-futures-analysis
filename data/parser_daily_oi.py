@@ -99,6 +99,46 @@ def parse_daily_oi_excel(content: bytes) -> list[DailyOIBalance]:
     return results
 
 
+_MINI_RE = re.compile(r'NK225 MINI ([PC])(\d{6})-(\d+)')
+
+
+def parse_daily_mini_oi_excel(content: bytes) -> list[DailyOIBalance]:
+    """別紙2（日経225ミニオプション、週次満期）を読む。レイアウトは別紙1と同じ。
+
+    contract_month には銘柄コードの 6 桁日付（最終取引日 YYMMDD）をそのまま入れる。
+    SQ 算出日はその翌暦日（火→水曜 SQ、木→金曜 SQ）。'限月合計' 行は読み飛ばす。
+    """
+    wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+    if len(wb.worksheets) < 3:
+        wb.close()
+        return []
+    ws = wb.worksheets[2]
+    try:
+        report_date = _extract_date(ws)
+    except ValueError:
+        wb.close()
+        return []
+    out: list[DailyOIBalance] = []
+    for row_idx in range(7, ws.max_row + 1):
+        for col, side in ((1, "P"), (7, "C")):
+            code = ws.cell(row=row_idx, column=col).value
+            if not code:
+                continue
+            m = _MINI_RE.search(str(code))
+            if not m or m.group(1) != side:
+                continue
+            out.append(DailyOIBalance(
+                report_date=report_date, contract_month=m.group(2), option_type="PUT" if side == "P" else "CALL",
+                strike_price=int(m.group(3)),
+                trading_volume=_safe_int(ws.cell(row=row_idx, column=col + 1).value),
+                current_oi=_safe_int(ws.cell(row=row_idx, column=col + 2).value),
+                net_change=_safe_int(ws.cell(row=row_idx, column=col + 3).value),
+                previous_oi=_safe_int(ws.cell(row=row_idx, column=col + 4).value),
+            ))
+    wb.close()
+    return out
+
+
 def _extract_date(ws) -> date:
     """Extract report date from row 2, column A."""
     val = ws.cell(row=2, column=1).value

@@ -26,12 +26,16 @@ _R2_PREFIX = "qri_iv/raw"
 _LOCAL_ROOT = config.CACHE_DIR / "qri_iv" / "raw"
 
 
-def list_snapshot_keys(day: date) -> list[str]:
-    """List R2 keys for a given day, sorted ascending (oldest first)."""
+_R2_PREFIX_MINI = "qri_iv_mini/raw"  # 日経225ミニオプション（週次満期）のスナップショット
+_LOCAL_ROOT_MINI = config.CACHE_DIR / "qri_iv_mini" / "raw"
+
+
+def list_snapshot_keys(day: date, prefix_root: str = _R2_PREFIX) -> list[str]:
+    """List R2 keys for a given day, sorted ascending (oldest first). prefix_root で月次/ミニを切り替える。"""
     r2_storage._init_client()
     if r2_storage._client is None:
         return []
-    prefix = f"{_R2_PREFIX}/{day.strftime('%Y%m%d')}/"
+    prefix = f"{prefix_root}/{day.strftime('%Y%m%d')}/"
     try:
         resp = r2_storage._client.list_objects_v2(
             Bucket=r2_storage._bucket, Prefix=prefix
@@ -74,8 +78,11 @@ def load_snapshot(key: str) -> Optional[pd.DataFrame]:
     content = _get_bytes(key)
     if content is None:
         # local fallback: strip prefix → cache path
-        rel = key[len(_R2_PREFIX) + 1:] if key.startswith(_R2_PREFIX) else key
-        local = _LOCAL_ROOT / rel
+        if key.startswith(_R2_PREFIX_MINI):
+            local = _LOCAL_ROOT_MINI / key[len(_R2_PREFIX_MINI) + 1:]
+        else:
+            rel = key[len(_R2_PREFIX) + 1:] if key.startswith(_R2_PREFIX) else key
+            local = _LOCAL_ROOT / rel
         if local.exists():
             content = local.read_bytes()
     if content is None:
