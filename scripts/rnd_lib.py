@@ -34,15 +34,14 @@ def source_time(k: str) -> str | None:
     return s.iloc[0][11:19] if len(s) else None
 
 
-def snap_for(day: str, max_t: str, cm: str, min_two_sided: int = 150, by_source: bool = True) -> str | None:
-    """その日の max_t 以前（既定: 気配時刻 source_update_time で判定）で、両気配が min_two_sided 以上ある最終スナップショットのキー。"""
+def snap_for(day: str, max_t: str, cm: str, min_two_sided: int = 150, by_source: bool = True, min_t: str = "00:00:00") -> str | None:
+    """その日の [min_t, max_t]（既定: 気配時刻 source_update_time で判定）で、両気配が min_two_sided 以上ある最終スナップショットのキー。"""
     ks = [k for k in iv_views.snapshot_keys(day) if iv_views.key_time_label(k) <= ("23:59:59" if by_source else max_t)]
     prefetch_snapshots(ks[-16:])
     for k in reversed(ks):
-        if by_source:
-            st = source_time(k)
-            if st is None or st > max_t:
-                continue
+        st = source_time(k) if by_source else iv_views.key_time_label(k)
+        if st is None or st > max_t or st < min_t:
+            continue
         g = iv_views._month_reduced(k, cm)
         if g is not None and int(g.q.sum()) >= min_two_sided:
             return k
@@ -50,8 +49,8 @@ def snap_for(day: str, max_t: str, cm: str, min_two_sided: int = 150, by_source:
 
 
 def day_close_snap(day: str, cm: str, min_two_sided: int = 150) -> str | None:
-    """日中引け（気配時刻 15:45:59 以前）の最終スナップショット。"""
-    return snap_for(day, DAY_CLOSE, cm, min_two_sided, by_source=True)
+    """日中引け（気配時刻 08:45〜15:45:59）の最終スナップショット。夜間立会（17:00〜翌06:00）の気配は使わない。"""
+    return snap_for(day, DAY_CLOSE, cm, min_two_sided, by_source=True, min_t="08:45:00")
 
 
 def _forward_from_delta(g: pd.DataFrame, T: float) -> float:
