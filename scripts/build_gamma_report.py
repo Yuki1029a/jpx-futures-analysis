@@ -1,0 +1,199 @@
+"""「市場が織り込むリスク回避度 γ」の推定レポート（PDF）。gamma_calc.py の出力を用いる。
+
+使い方: python scripts/build_gamma_report.py <計算結果ディレクトリ> <出力フォルダ>
+"""
+from __future__ import annotations
+
+import json
+import sys
+from datetime import date
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.platypus import CondPageBreak, PageBreak, SimpleDocTemplate
+
+from report_kit import A, B, BODY, CAP, EQ, GRID, H1, H2, INK, MUT, O, SMALL, SUB, TBL, TITLE, Y, Pg, fig_to_img, fmt, make_footer, sp, style_ax
+
+CALC = Path(sys.argv[1]); OUT_DIR = Path(sys.argv[2]); OUT_DIR.mkdir(parents=True, exist_ok=True)
+PDF_PATH = OUT_DIR / "nk225op_market_implied_gamma_report.pdf"
+G = json.load(open(CALC / "gamma_calc.json")); S_ = pd.read_json(CALC / "gamma_series.json"); L = np.load(CALC / "gamma_latest.npz")
+S_["day"] = S_.day.astype(str); S_["date"] = pd.to_datetime(S_.day); S_ = S_[S_.ts.str[11:13].astype(int) >= 8].reset_index(drop=True)  # 夜間のみの日を除外
+rel, boot, mle, lat = G["series_summary"], G["boot"], G["mle"], G["latest"]
+last = S_.iloc[-1]; VAR = ["gamma_I", "gamma_rv60", "gamma_c80", "gamma_bw"]
+pct = lambda v: f"{v*100:.1f}%"
+
+
+# ------------------------------------------------------------------ 図
+def fig_series():
+    fig, ax = plt.subplots(3, 1, figsize=(7.2, 7.4), sharex=True); d = S_.date
+    lo, hi = S_[VAR].min(axis=1), S_[VAR].max(axis=1)
+    ax[0].fill_between(d, lo, hi, color=B, alpha=0.18, label="変種（RV60 スケール・中央 80%・狭い帯域）の範囲")
+    ax[0].plot(d, S_.gamma_I, color=B, lw=1.8, label="γ̂（方法 I：カーネル法、基準設定）"); ax[0].plot(d, S_.gamma_II, color=O, lw=1.2, ls="--", label="γ̂（方法 II：モーメント法）")
+    ax[0].axhline(0, color=MUT, lw=0.8); ax[0].set_ylim(min(-1, float(lo.min()) - 0.3), max(6, float(S_.gamma_II.quantile(0.95)) + 0.5))
+    style_ax(ax[0], "図1  市場が織り込むリスク回避度 γ の日次推定（期近限月、引け）", "", "γ"); ax[0].legend(fontsize=7.5, frameon=False)
+    ax[1].plot(d, S_.F, color=INK, lw=1.6); style_ax(ax[1], "", "", "先物推定値 F（円）")
+    ax[2].plot(d, S_.atm * 100, color=B, lw=1.4, label="ATM IV"); ax[2].plot(d, S_.rv20 * 100, color=O, lw=1.4, label="RV₂₀"); style_ax(ax[2], "", "", "%"); ax[2].legend(fontsize=7.5, frameon=False)
+    fig.autofmt_xdate()
+    return fig_to_img(fig)
+
+
+def fig_kernel():
+    x, lnM = L["xsel"], L["lnM"]; a_, g_ = lat["a"], lat["gamma"]
+    fig, ax = plt.subplots(1, 2, figsize=(7.2, 3.0))
+    ax[0].plot(x * 100, lnM, color=B, lw=1.8, label="ln[f_Q(x)/f_P(x)]（観測）"); ax[0].plot(x * 100, a_ - g_ * x, color=O, lw=1.4, ls="--", label=f"直線当てはめ（γ̂ = {g_:.2f}）")
+    style_ax(ax[0], f"図2a  対数プライシング・カーネル（{lat['day'][4:6]}/{lat['day'][6:]} 引け）", "x = ln(K/F)（%）", "ln M + 定数"); ax[0].legend(fontsize=7, frameon=False)
+    K = L["K"]; sel = (K >= 0.78 * lat["F"]) & (K <= 1.2 * lat["F"]); xg = L["x"]
+    ax[1].plot(K[sel], (L["fQ"] / K)[sel] * 1e5, color=B, lw=1.8, label="f_Q（オプション）"); ax[1].plot(K[sel], (L["fP"] / K)[sel] * 1e5, color=MUT, lw=1.4, ls="--", label="f_P（歴史的リターン、現在の RV で再スケール）")
+    ax[1].axvline(lat["F"], color=INK, lw=0.8); style_ax(ax[1], "図2b  二つの密度", "SQ値（円）", "確率密度（%/1,000円）"); ax[1].legend(fontsize=7, frameon=False)
+    fig.tight_layout()
+    return fig_to_img(fig)
+
+
+def fig_relation():
+    fig, ax = plt.subplots(1, 2, figsize=(7.2, 3.0))
+    ax[0].scatter(S_.ret20 * 100, S_.gamma_I, s=14, color=B); style_ax(ax[0], "図3a  γ̂ と直近 20 日リターン", "20 日対数リターン（%）", "γ̂")
+    ax[1].scatter(S_.rv20 * 100, S_.gamma_I, s=14, color=O); style_ax(ax[1], "図3b  γ̂ と実現ボラティリティ RV₂₀", "RV₂₀（%）", "γ̂")
+    for a_ in ax:
+        a_.axhline(0, color=MUT, lw=0.8)
+    fig.tight_layout()
+    return fig_to_img(fig)
+
+
+def fig_mle():
+    p28, pall = mle["profile_28d"], mle["profile_all"]; g = np.array(p28["grid"])
+    fig, a = plt.subplots(figsize=(7.2, 3.0)); ll = np.array(p28["ll"]); a.plot(g, ll - ll.max(), color=B, lw=2, label=f"残存 28 日前後の予測（{p28['n']} 限月）")
+    lla = np.array(pall["ll"]); a.plot(g, (lla - lla.max()) * 1, color=O, lw=1.4, ls="--", label="各限月の全予測日の平均（参考）")
+    a.axhline(-1.92, color=MUT, lw=0.8, ls=":"); a.text(g[-1], -1.8, "95% 区間の閾値（−1.92）", ha="right", fontsize=7.5, color=MUT)
+    a.axvline(p28["gamma_hat"], color=B, lw=0.8)
+    style_ax(a, "図4  最尤法（方法 III）のプロファイル対数尤度（最大値からの差）", "γ", "対数尤度の差"); a.legend(fontsize=7.5, frameon=False, loc="lower left")
+    return fig_to_img(fig)
+
+
+# ------------------------------------------------------------------ 文書
+S = []
+S += [sp(8), Pg("市場が織り込むリスク回避度 γ の推定", TITLE), Pg("日経225オプションのリスク中立分布と歴史的リターン分布から：方法・日次系列・精度・蓄積の設計", SUB),
+      TBL([["項目", "内容"],
+           ["対象", f"日経225オプション期近限月、各営業日の日中引け（気配時刻 15:45:59 以前の最終）。{S_.day.iloc[0]} 〜 {S_.day.iloc[-1]}（{len(S_)} 営業日）"],
+           ["γ の意味", "代表的投資家のべき効用 U(S) = S^(1−γ)/(1−γ) の相対的リスク回避度。オプション価格が内包する保険料の大きさを一つの数に要約する"],
+           ["推定法", "I. カーネル法（リスク中立密度 ÷ 歴史的密度の対数を x に回帰）、II. モーメント法（歪度と尖度の関係）、III. 最尤法（実現 SQ 値の尤度）"],
+           ["データ", "QRI スナップショット（R2、2026-06〜）、日経平均日次終値（2000-01〜、Yahoo Finance）、JPX 最終清算数値（sq_his.pdf）"],
+           ["作成", f"{date.today():%Y-%m-%d}、先物手口分析ワークスペース（scripts/gamma_calc.py, scripts/build_gamma_report.py）"]], [30, 148]),
+      sp(5), Pg("要約", H1),
+      Pg(f"・方法 I による γ̂ の日次系列は平均 {rel['mean']:.2f}、中央値 {rel['median']:.2f}、10〜90% 点 {rel['q10']:.2f}〜{rel['q90']:.2f}、直近（{last.day[4:6]}/{last.day[6:]}）{last.gamma_I:.2f}。"
+         f"文献の代表値（Bliss–Panigirtzoglou の 4 前後）より小さい。方法 II の平均は {rel['mean_II']:.2f} で、方法 I との相関は {rel['corr']['gII']:+.2f}。"),
+      Pg(f"・対数プライシング・カーネルは直線（べき効用）で十分に表せない。直線の決定係数は平均 {S_.r2.mean():.2f} で、2 次項が一貫して負（平均 {S_.quad.mean():.1f}）である。"
+         "すなわち、中心付近では保険料が小さく、両裾で急に大きくなる形をしている。γ を一つの数で表すときは「中央 90% の範囲での平均的な傾き」と理解する必要がある。"),
+      Pg(f"・原資産との関係：γ̂ は直近 20 日リターンと相関 {rel['corr']['ret20']:+.2f}、実現ボラティリティと {rel['corr']['rv20']:+.2f}、IV÷RV と {rel['corr']['ivrv']:+.2f}。"
+         f"{'下落・高ボラ局面で γ̂ が上がる（反循環的なリスク回避）傾向が見える' if rel['corr']['ret20'] < -0.2 else '4 か月の標本では価格水準との安定した関係は確認できない'}。"
+         f"先行性（γ̂ と次の 5・10・20 営業日のリターンの相関）は {rel['fwd_corr']['5']:+.2f} / {rel['fwd_corr']['10']:+.2f} / {rel['fwd_corr']['20']:+.2f} で、標本が少なく結論は出せない。"),
+      Pg(f"・精度：方法 I の設定の違い（RV60 でのスケール、中央 80%、狭い帯域）による γ̂ の幅は 1 日あたり平均 {rel['variant_spread']:.2f}。最終日のブロック・ブートストラップでは標準誤差 {boot['sd']:.2f}（95% 区間 {boot['lo']:.2f}〜{boot['hi']:.2f}）。"
+         f"最尤法（方法 III、{mle['profile_28d']['n']} 限月）の γ̂ は {mle['profile_28d']['gamma_hat']:.2f} だが、95% 区間は {mle['profile_28d']['ci_lo']:.2f}〜{mle['profile_28d']['ci_hi']:.2f} と広く、現時点では情報量が乏しい。"),
+      Pg("・目下の方針：γ̂（方法 I）とその変種、カーネルの 2 次項、方法 II、F、RV、IV を日次で蓄積し、満期ごとに実現 SQ の尤度（方法 III）を積み上げる。1 年で方法 III の区間が実用的な幅に縮む見込み（第 8 章）。"),
+      sp(3), Pg("構成", H2), Pg("1. 問いの定義　2. 理論　3. データと実装　4. 結果 I：日次系列　5. 結果 II：最尤法　6. 原資産価格との関係　7. 精度の評価と向上策　8. 蓄積の設計　9. 留意点・参考文献", SMALL),
+      PageBreak()]
+
+S += [Pg("1. 問いの定義", H1),
+      Pg("「市場が織り込む γ」とは、オプション価格から得られるリスク中立分布 f_Q と、実際に起こりうる分布 f_P の差を、代表的投資家のリスク回避度として一つの数に要約したものである。"
+         "γ が大きいほど、下落状態の受取が高く評価されており、f_Q は f_P より左に厚い。γ = 0 なら保険料は無く、f_Q = f_P である。"),
+      Pg("γ は観測できない f_P に依存するため、推定には f_P を何で近似するかの仮定が要る。本稿は三つの独立な近似（歴史的分布、モーメントの関係、実現値の尤度）で推定し、互いの整合と精度を評価する。"),
+      Pg("2. 理論", H1), Pg("2.1 べき効用とプライシング・カーネル", H2),
+      Pg("確率的割引因子 M(S) を用いると f_Q(S) = f_P(S)·M(S)/E_P[M] である。べき効用 U(S) = S^(1−γ)/(1−γ) では M(S) ∝ U′(S) = S^(−γ) なので、対数を取ると"),
+      EQ(r"\ln\frac{f_{Q}(S)}{f_{P}(S)} = a - \gamma\,\ln S = a' - \gamma\,x,\qquad x = \ln\frac{S}{F}"),
+      Pg("となる。すなわち、二つの密度の比の対数は x の直線で、傾きが −γ である。これが方法 I の根拠である。直線から外れる（曲がる）なら、べき効用の仮定が成り立っていない。"),
+      Pg("2.2 モーメルの関係（方法 II）", H2),
+      Pg("Bakshi, Kapadia and Madan (2003) は、べき効用のもとでリスク中立歪度と実確率のモーメントが近似的に次の関係を満たすことを示した。"),
+      EQ(r"\mathrm{Skew}_{Q} \approx \mathrm{Skew}_{P} - \gamma\, s_{P}\,(\mathrm{Kurt}_{P} - 3)\quad\Rightarrow\quad \hat\gamma_{II} = \frac{\mathrm{Skew}_{P} - \mathrm{Skew}_{Q}}{s_{P}\,(\mathrm{Kurt}_{P}-3)}"),
+      Pg("s_P、Kurt_P は実確率の対数リターンの標準偏差と尖度である。密度全体ではなく 3 つのモーメントだけを使うため、両翼の推定誤差の影響を受けにくい一方、尖度の推定誤差に敏感である。"),
+      Pg("2.3 最尤法（方法 III）", H2),
+      Pg("満期 i の予測時点で得たリスク中立密度 f_Q,i を γ で傾けた密度 f_P,i(S; γ) ∝ f_Q,i(S)·S^γ で、実現した SQ 値 S_i の尤度を評価し、"),
+      EQ(r"\hat\gamma_{III} = \arg\max_{\gamma}\ \sum_{i}\ln f_{P,i}(S_{i};\gamma)"),
+      Pg("とする（Bliss and Panigirtzoglou 2004）。f_P の近似に歴史的分布を使わない点で方法 I・II と独立である。満期ごとに 1 点しか得られないため、精度は標本数（満期の数）で決まる。95% 区間は対数尤度が最大値から 1.92 以内の γ の範囲（尤度比検定）とする。"),
+      Pg("3. データと実装", H1), Pg("3.1 リスク中立密度 f_Q", H2),
+      Pg("各営業日の期近限月（SQ まで 8 日以上残るもの）について、日中引け（気配時刻 08:45〜15:45:59 の最終スナップショット、両気配 120 銘柄以上）から SVI を当てはめ、密度を x ∈ [−0.6, 0.6] の 6,001 点で計算した（手順は前々稿）。"
+         "当てはめ誤差が 3%pt を超える日、密度が負になる日は除外した。2026-07-13 より前の収集分は価格の桁が欠落しているため、先物価格はコールのデルタと IV から逆算した。"),
+      Pg("3.2 実確率密度 f_P（方法 I・II）", H2),
+      Pg("日経平均の日次終値（2000-01〜）から、残存期間に対応する n 営業日（n = T×250）の対数リターン r_n を作り、各期間の開始時点の実現ボラティリティ RV₂₀ で割って標準化する。これを現在の RV₂₀ で再スケールした標本 x_j = (r_n,j / RV₂₀,j) × RV₂₀,now を、"
+         "ガウス・カーネル密度（Scott の帯域）で平滑化して f_P(x) とする。標準化により、ボラティリティ水準の違う過去の期間を現在の局面に揃えつつ、多日リターンの歪みと厚い裾（経験分布）を保つ。"),
+      Pg("3.3 回帰（方法 I）", H2),
+      Pg("リスク中立の累積確率が 5〜95% の範囲で ln f_Q(x) − ln f_P(x) を x に回帰する（重み = f_Q の質量）。傾きの符号を反転した値が γ̂ である。2 次項を加えた回帰も行い、直線からの乖離（曲率）を記録する。"),
+      Pg("3.4 精度の設計", H2),
+      Pg("設定の違いによる変動（RV₆₀ での再スケール、中央 80% の範囲、狭い帯域）を毎日計算し、幅を記録する。最終日についてはブロック・ブートストラップ（ブロック長 = n 日、200 回）で標準誤差を求める。"),
+      PageBreak()]
+
+S += [Pg("4. 結果 I：日次系列", H1), fig_series(),
+      TBL([["統計量（方法 I、基準設定）", "値"],
+           ["標本", f"{len(S_)} 営業日（{S_.day.iloc[0][:4]}-{S_.day.iloc[0][4:6]}-{S_.day.iloc[0][6:]} 〜 {S_.day.iloc[-1][:4]}-{S_.day.iloc[-1][4:6]}-{S_.day.iloc[-1][6:]}）"],
+           ["平均 / 中央値 / 標準偏差", f"{rel['mean']:.2f} / {rel['median']:.2f} / {rel['sd']:.2f}"],
+           ["10% 点 / 90% 点", f"{rel['q10']:.2f} / {rel['q90']:.2f}"],
+           ["1 日の自己相関", f"{rel['autocorr1']:.2f}"],
+           ["直線当てはめの決定係数（平均）", f"{S_.r2.mean():.2f}"],
+           ["2 次項（平均、負なら両裾で保険料が急増）", f"{S_.quad.mean():.1f}"],
+           ["方法 II の平均 / 方法 I との相関", f"{rel['mean_II']:.2f} / {rel['corr']['gII']:+.2f}"],
+           [f"直近 {last.day[4:6]}/{last.day[6:]}", f"γ̂_I = {last.gamma_I:.2f}（変種 {min(last[VAR]):.2f}〜{max(last[VAR]):.2f}）、γ̂_II = {last.gamma_II:.2f}、F = {fmt(last.F)}、ATM IV {last.atm*100:.1f}%、RV₂₀ {last.rv20*100:.1f}%"]], [80, 98]),
+      Pg("表1  日次系列の要約。", CAP), fig_kernel(),
+      Pg(f"図2a は最終日の対数カーネルである。中央部では傾きが緩く、両端で急に立ち上がる。直線で近似した傾き（γ̂ = {lat['gamma']:.2f}）は、この曲線の「中央 90% の平均的な傾き」に過ぎない。"
+         "この形は米国株でも繰り返し報告されており（Jackwerth 2000、Aït-Sahalia and Lo 2000 の「プライシング・カーネル・パズル」）、べき効用では説明できない。"
+         "実務上の含意は、保険料を一つの γ で取り除くと、中央部では取り過ぎ、両裾では取り足りない、ということである。"),
+      Pg(f"方法 II（モーメント法）の γ̂ は平均 {rel['mean_II']:.2f} と方法 I より{'大きい' if rel['mean_II'] > rel['mean'] else '小さい'}。モーメント法は両裾の厚さ（尖度）の差を γ に押し込めるため、裾の保険料が大きい局面で高く出る。"
+         "二つの方法の差そのものが「べき効用で表せない部分」の大きさの目安になる。"),
+      PageBreak(),
+      Pg("5. 結果 II：最尤法（実現 SQ 値による検証）", H1), fig_mle(),
+      TBL([["限月", "予測時点", "残存", "F（予測時）", "実現 SQ", "u = Φ_Q(SQ)", "単独の γ̂"]] +
+          [[e["cm"][:2] + "年" + e["cm"][2:] + "月限", f"{e['day28'][4:6]}/{e['day28'][6:]}", f"{e['T28']:.0f} 日", fmt(e["F28"]), fmt(e["sq"]), f"{e['u0']:.2f}", f"{e['gamma_hat_single']:.2f}"] for e in mle["expiries"]], [30, 24, 20, 28, 28, 26, 22]),
+      Pg(f"表2  満期ごとの実現値。u はリスク中立分布における実現値の分位（0.5 が中央）。{mle['profile_28d']['n']} 限月の合計対数尤度を最大にする γ̂ = {mle['profile_28d']['gamma_hat']:.2f}、95% 区間 {mle['profile_28d']['ci_lo']:.2f}〜{mle['profile_28d']['ci_hi']:.2f}。", CAP),
+      Pg("u が 0.5 を上回る満期が多ければ、実現値は分布の上側に出やすい（保険料を取り除くと分布は右へ寄るべき）ことを示し、γ > 0 と整合する。"
+         f"ただし {mle['profile_28d']['n']} 点では区間が広く、γ = 0 を含む。方法 III は蓄積によって初めて精度が出る指標であり、現時点では方法 I・II の外部検証として位置づける。"),
+      Pg("6. 原資産価格との関係", H1), fig_relation(),
+      TBL([["相関（方法 I の γ̂ と）", "値"],
+           ["ln F（水準）", f"{rel['corr']['lnF']:+.2f}"], ["直近 20 日の対数リターン", f"{rel['corr']['ret20']:+.2f}"], ["RV₂₀", f"{rel['corr']['rv20']:+.2f}"], ["ATM IV", f"{rel['corr']['atm']:+.2f}"], ["IV ÷ RV₂₀", f"{rel['corr']['ivrv']:+.2f}"],
+           ["次の 5 / 10 / 20 営業日のリターン（先行性）", f"{rel['fwd_corr']['5']:+.2f} / {rel['fwd_corr']['10']:+.2f} / {rel['fwd_corr']['20']:+.2f}（n = {rel['fwd_n']['5']} / {rel['fwd_n']['10']} / {rel['fwd_n']['20']}）"],
+           ["回帰 γ̂ = a + b·ret20 + c·RV₂₀", f"a = {rel['reg']['const']:.2f}、b = {rel['reg']['ret20']:.2f}、c = {rel['reg']['rv20']:.2f}"]], [90, 88]),
+      Pg("表3  γ̂ と原資産・ボラティリティの関係（2026-06〜10、重複標本のため相関の有意性は割り引いて読む）。", CAP),
+      Pg("理論的には、習慣形成モデル（Campbell and Cochrane 1999）のように下落後にリスク回避が高まるなら、γ̂ は 20 日リターンと負、ボラティリティと正の相関を持つ。"
+         f"標本では ret20 との相関が {rel['corr']['ret20']:+.2f}、RV₂₀ との相関が {rel['corr']['rv20']:+.2f} である。ただし f_P を現在の RV で再スケールしているため、ボラティリティが急上昇した直後は f_P が広がって γ̂ が機械的に下がる側面がある（第 7 章）。"
+         "価格との関係を蓄積する際は、γ̂ と同時に RV₂₀、ATM IV、IV÷RV を保存し、ボラティリティ要因を制御した上で評価する。"),
+      PageBreak()]
+
+S += [Pg("7. 精度の評価と向上策", H1), Pg("7.1 誤差の源", H2),
+      TBL([["源", "影響", "対策"],
+           ["f_P のスケール（どのボラティリティで再スケールするか）", f"RV₂₀ と RV₆₀ の違いだけで γ̂ は 1 日平均 {abs(S_.gamma_I - S_.gamma_rv60).mean():.2f} 動く。急変動直後に最も大きい", "GARCH 型の条件付き分散予測、または IV の一定割合（IV×RV/IV の長期平均）でスケールする"],
+           ["f_P の形（歴史的分布の期間・標本）", "2008 年・2020 年を含むかで裾が変わる", "期間を分けた感度分析。将来は週次満期の実現値で f_P を直接検証"],
+           ["中央範囲の選び方", f"90% と 80% で平均 {abs(S_.gamma_I - S_.gamma_c80).mean():.2f} の差", "範囲を固定して「変化」を見る。曲率（2 次項）を併記"],
+           ["f_Q の両翼（SVI の補外・気配の幅）", "5% 点より外で密度の誤差が大きい", "中央範囲に限定（実施済み）。深い OTM の気配幅で重み付け"],
+           ["気配時刻", "引け前後で IV が動く。夜間の気配を混ぜると不連続", "気配時刻 15:45:59 以前の最終に統一（実施済み）。収集を 16:15 まで延長（実施済み）"],
+           ["標本数（方法 III）", f"{mle['profile_28d']['n']} 限月では区間が γ = 0 を含む", "月次限月の蓄積（年 12 点）。週次満期の IV を収集できれば年 100 点超"]], [52, 62, 64]),
+      Pg("7.2 ブートストラップによる標準誤差（最終日）", H2),
+      Pg(f"f_P の標本（歴史的 n 日リターン）をブロック長 {boot['block']} 日で {boot['n']} 回再抽出して γ̂ を再計算した結果、平均 {boot['mean']:.2f}、標準誤差 {boot['sd']:.2f}、95% 区間 {boot['lo']:.2f}〜{boot['hi']:.2f}。"
+         "歴史的分布の標本誤差だけでこの幅があり、設定の違い（7.1）を加えると不確実性はさらに大きい。日次の γ̂ は小数第 1 位までの精度と考える。"),
+      Pg("7.3 向上策の優先順位", H2),
+      Pg("(1) 条件付き分散の予測で f_P をスケールする（RV₂₀ の機械的な遅れを除く）。(2) 方法 I・II・III を同じ日付で並べ、三者の乖離を監視する。(3) 2 次項を含むカーネルの形を記録し、γ を「中央の傾き」と「裾の増分」の二つの数に分ける。"
+         "(4) 満期ごとの実現値を蓄積し、方法 III の区間を縮める。(5) 週次満期（ミニ）の IV 収集を検討する。"),
+      Pg("8. 蓄積の設計", H1),
+      TBL([["項目", "内容"],
+           ["頻度・時点", "各営業日の日中引け（気配時刻 15:45:59 以前の最終スナップショット）。夜間立会の値は別列に参考保存"],
+           ["保存する列", "day, cm, ts, F, T, atm, rv20, rv60, iv_mf, rmse, p（SVI 5 パラメータ）, gamma_I, gamma_rv60, gamma_c80, gamma_bw, quad, r2, gamma_II, skew_q, kurt_q, skew_p, kurt_p, ret20"],
+           ["満期ごとの記録", "cm, 予測日, T, F, 分位点, 実現 SQ, u = Φ_Q(SQ), ln f_P(SQ; γ) の γ 格子（方法 III の積み上げ用）"],
+           ["保存先", "R2 の qri_iv/derived/ 配下に日次 JSON（既存の収集ジョブに追加）。本稿の scripts/gamma_calc.py をそのまま日次実行する"],
+           ["検証計画", "3 か月ごとに：γ̂ の分布、価格・ボラとの相関、方法 III のプロファイル尤度、PIT の一様性（Berkowitz 検定）を更新"]], [34, 144]),
+      CondPageBreak(60 * mm), Pg("9. 留意点", H1),
+      Pg("・γ̂ は「べき効用が成り立つとしたときの中央部の傾き」であり、投資家のリスク回避度そのものではない。カーネルの曲率が大きい局面では一つの数で表すこと自体に無理がある。"),
+      Pg("・f_P は歴史的分布の再スケールという近似で、構造変化（市場制度、投資家構成）を反映しない。"),
+      Pg("・4 か月の標本で、急落（8/19、10/15）が 2 回含まれる。統計量はこれらの日に引きずられる。"),
+      sp(3), Pg("参考文献", H2),
+      Pg("Aït-Sahalia, Y. and A. Lo (2000), Nonparametric Risk Management and Implied Risk Aversion, Journal of Econometrics 94.", SMALL),
+      Pg("Bakshi, G., N. Kapadia and D. Madan (2003), Stock Return Characteristics, Skew Laws, and the Differential Pricing of Individual Equity Options, Review of Financial Studies 16.", SMALL),
+      Pg("Bliss, R. and N. Panigirtzoglou (2004), Option-Implied Risk Aversion Estimates, Journal of Finance 59.", SMALL),
+      Pg("Campbell, J. and J. Cochrane (1999), By Force of Habit: A Consumption-Based Explanation of Aggregate Stock Market Behavior, Journal of Political Economy 107.", SMALL),
+      Pg("Jackwerth, J. (2000), Recovering Risk Aversion from Option Prices and Realized Returns, Review of Financial Studies 13.", SMALL),
+      Pg("Rosenberg, J. and R. Engle (2002), Empirical Pricing Kernels, Journal of Financial Economics 64.", SMALL),
+      Pg("Shiratsuka, S. (2001), Information Content of Implied Probability Distributions: Empirical Studies on Japanese Stock Price Index Options, Monetary and Economic Studies 19(3), Bank of Japan.", SMALL)]
+
+doc = SimpleDocTemplate(str(PDF_PATH), pagesize=A4, leftMargin=16 * mm, rightMargin=16 * mm, topMargin=16 * mm, bottomMargin=18 * mm, title="市場が織り込むリスク回避度 γ の推定", author="先物手口分析")
+ft = make_footer(f"市場が織り込むリスク回避度 γ の推定（データ 〜{last.day[:4]}-{last.day[4:6]}-{last.day[6:]} 引け、作成 {date.today():%Y-%m-%d}）")
+doc.build(S, onFirstPage=ft, onLaterPages=ft)
+print("written", PDF_PATH)
