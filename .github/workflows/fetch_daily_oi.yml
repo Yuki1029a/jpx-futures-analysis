@@ -45,7 +45,9 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-        run: python scripts/gamma_daily.py
+        run: |
+          python scripts/gamma_daily.py
+          python scripts/gamma_mle.py cache/derived --upload
 
       - name: Trigger Streamlit Cloud re-deploy
         run: |

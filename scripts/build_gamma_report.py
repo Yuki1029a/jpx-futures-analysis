@@ -21,7 +21,7 @@ from report_kit import A, B, BODY, CAP, EQ, GRID, H1, H2, INK, MUT, O, SMALL, SU
 
 CALC = Path(sys.argv[1]); OUT_DIR = Path(sys.argv[2]); OUT_DIR.mkdir(parents=True, exist_ok=True)
 PDF_PATH = OUT_DIR / "nk225op_market_implied_gamma_report.pdf"
-G = json.load(open(CALC / "gamma_calc.json")); S_ = pd.read_json(CALC / "gamma_series.json"); L = np.load(CALC / "gamma_latest.npz")
+G = json.load(open(CALC / "gamma_calc.json")); ML = json.load(open(CALC / "gamma_mle.json")); S_ = pd.read_json(CALC / "gamma_series.json"); L = np.load(CALC / "gamma_latest.npz")
 S_["day"] = S_.day.astype(str); S_["date"] = pd.to_datetime(S_.day); S_ = S_[S_.ts.str[11:13].astype(int) >= 8].reset_index(drop=True)  # 夜間のみの日を除外
 rel, boot, mle, lat = G["series_summary"], G["boot"], G["mle"], G["latest"]
 last = S_.iloc[-1]; VAR = ["gamma_I", "gamma_rv60", "gamma_c80", "gamma_bw"]
@@ -65,12 +65,14 @@ def fig_relation():
 
 
 def fig_mle():
-    p28, pall = mle["profile_28d"], mle["profile_all"]; g = np.array(p28["grid"])
-    fig, a = plt.subplots(figsize=(7.2, 3.0)); ll = np.array(p28["ll"]); a.plot(g, ll - ll.max(), color=B, lw=2, label=f"残存 28 日前後の予測（{p28['n']} 限月）")
-    lla = np.array(pall["ll"]); a.plot(g, (lla - lla.max()) * 1, color=O, lw=1.4, ls="--", label="各限月の全予測日の平均（参考）")
+    g = np.array(ML["grid"]); pm, pa, pw = ML["profile_monthly"], ML["profile_all"], ML["profile_weekly"]
+    fig, a = plt.subplots(figsize=(7.2, 3.0)); ll = np.array(pm["ll"]); a.plot(g, ll - ll.max(), color=B, lw=2, label=f"月次限月（{pm['n']} 点、残存 28 日前後の予測）")
+    if pw:
+        lw_ = np.array(pw["ll"]); a.plot(g, lw_ - lw_.max(), color=O, lw=1.6, ls="--", label=f"週次満期（{pw['n']} 点）")
+        la = np.array(pa["ll"]); a.plot(g, la - la.max(), color=INK, lw=1.2, label=f"合計（{pa['n']} 点）")
     a.axhline(-1.92, color=MUT, lw=0.8, ls=":"); a.text(g[-1], -1.8, "95% 区間の閾値（−1.92）", ha="right", fontsize=7.5, color=MUT)
-    a.axvline(p28["gamma_hat"], color=B, lw=0.8)
-    style_ax(a, "図4  最尤法（方法 III）のプロファイル対数尤度（最大値からの差）", "γ", "対数尤度の差"); a.legend(fontsize=7.5, frameon=False, loc="lower left")
+    a.axvline(pa["gamma_hat"], color=B, lw=0.8); a.axvline(0, color=MUT, lw=0.6); a.set_ylim(-4, 0.3)
+    style_ax(a, "図4  最尤法（方法 III）のプロファイル対数尤度（最大値からの差、格子 −6〜12）", "γ", "対数尤度の差"); a.legend(fontsize=7.5, frameon=False, loc="lower left")
     return fig_to_img(fig)
 
 
@@ -92,7 +94,7 @@ S += [sp(8), Pg("市場が織り込むリスク回避度 γ の推定", TITLE), 
          f"{'下落・高ボラ局面で γ̂ が上がる（反循環的なリスク回避）傾向が見える' if rel['corr']['ret20'] < -0.2 else '4 か月の標本では価格水準との安定した関係は確認できない'}。"
          f"先行性（γ̂ と次の 5・10・20 営業日のリターンの相関）は {rel['fwd_corr']['5']:+.2f} / {rel['fwd_corr']['10']:+.2f} / {rel['fwd_corr']['20']:+.2f} で、標本が少なく結論は出せない。"),
       Pg(f"・精度：方法 I の設定の違い（RV60 でのスケール、中央 80%、狭い帯域）による γ̂ の幅は 1 日あたり平均 {rel['variant_spread']:.2f}。最終日のブロック・ブートストラップでは標準誤差 {boot['sd']:.2f}（95% 区間 {boot['lo']:.2f}〜{boot['hi']:.2f}）。"
-         f"最尤法（方法 III、{mle['profile_28d']['n']} 限月）の γ̂ は {mle['profile_28d']['gamma_hat']:.2f} だが、95% 区間は {mle['profile_28d']['ci_lo']:.2f}〜{mle['profile_28d']['ci_hi']:.2f} と広く、現時点では情報量が乏しい。"),
+         f"最尤法（方法 III、月次 {ML['profile_monthly']['n']} 限月、格子 −6〜12）の γ̂ は {ML['profile_all']['gamma_hat']:+.2f} だが、95% 区間は {ML['profile_all']['ci_lo']:+.1f}〜{ML['profile_all']['ci_hi']:+.1f} と格子全体に及び、現時点では情報量が乏しい。週次満期（ミニ）の取り込みを開始し、実現待ち {len(ML['pending'])} 本。"),
       Pg("・目下の方針：γ̂（方法 I）とその変種、カーネルの 2 次項、方法 II、F、RV、IV を日次で蓄積し、満期ごとに実現 SQ の尤度（方法 III）を積み上げる。1 年で方法 III の区間が実用的な幅に縮む見込み（第 8 章）。"),
       sp(3), Pg("構成", H2), Pg("1. 問いの定義　2. 理論　3. データと実装　4. 結果 I：日次系列　5. 結果 II：最尤法　6. 原資産価格との関係　7. 精度の評価と向上策　8. 蓄積の設計　9. 留意点・参考文献", SMALL),
       PageBreak()]
@@ -144,10 +146,15 @@ S += [Pg("4. 結果 I：日次系列", H1), fig_series(),
       PageBreak(),
       Pg("5. 結果 II：最尤法（実現 SQ 値による検証）", H1), fig_mle(),
       TBL([["限月", "予測時点", "残存", "F（予測時）", "実現 SQ", "u = Φ_Q(SQ)", "単独の γ̂"]] +
-          [[e["cm"][:2] + "年" + e["cm"][2:] + "月限", f"{e['day28'][4:6]}/{e['day28'][6:]}", f"{e['T28']:.0f} 日", fmt(e["F28"]), fmt(e["sq"]), f"{e['u0']:.2f}", f"{e['gamma_hat_single']:.2f}"] for e in mle["expiries"]], [30, 24, 20, 28, 28, 26, 22]),
-      Pg(f"表2  満期ごとの実現値。u はリスク中立分布における実現値の分位（0.5 が中央）。{mle['profile_28d']['n']} 限月の合計対数尤度を最大にする γ̂ = {mle['profile_28d']['gamma_hat']:.2f}、95% 区間 {mle['profile_28d']['ci_lo']:.2f}〜{mle['profile_28d']['ci_hi']:.2f}。", CAP),
-      Pg("u が 0.5 を上回る満期が多ければ、実現値は分布の上側に出やすい（保険料を取り除くと分布は右へ寄るべき）ことを示し、γ > 0 と整合する。"
-         f"ただし {mle['profile_28d']['n']} 点では区間が広く、γ = 0 を含む。方法 III は蓄積によって初めて精度が出る指標であり、現時点では方法 I・II の外部検証として位置づける。"),
+          [[e["cm"][:2] + "年" + e["cm"][2:] + "月限", f"{e['day'][4:6]}/{e['day'][6:]}", f"{e['T_days']:.0f} 日", fmt(e["F"]), fmt(e["sq"]), f"{e['u']:.2f}", f"{e['gamma_single']:+.1f}"] for e in ML["monthly"]] +
+          [[f"週次 SQ {e['sq_day'][4:6]}/{e['sq_day'][6:]}", f"{e['forecast_day'][4:6]}/{e['forecast_day'][6:]}", f"{e['T_days']:.1f} 日", fmt(e["F"]), fmt(e["sq"]), f"{e['u']:.2f}", f"{e['gamma_single']:+.1f}"] for e in ML["weekly"]], [30, 24, 20, 28, 28, 26, 22]),
+      Pg(f"表2  満期ごとの実現値。u はリスク中立分布における実現値の分位（0.5 が中央）。単独の γ̂ は格子の端（−6 または +12）に張り付く。"
+         f"合計 {ML['profile_all']['n']} 点の γ̂ = {ML['profile_all']['gamma_hat']:+.2f}、95% 区間 {ML['profile_all']['ci_lo']:+.1f}〜{ML['profile_all']['ci_hi']:+.1f}。γ = 0 と最大値の対数尤度差は {ML['profile_monthly']['ll_at_0']-ML['profile_monthly']['llmax']:+.2f}。", CAP),
+      Pg("格子を負側（−6）まで広げても結論は変わらない。上で実現した満期は γ を上げたがり、下で実現した満期は下げたがるため、合計の尤度は平坦で、γ = 0 も区別できない。"
+         "方法 III は蓄積によって初めて精度が出る指標であり、現時点では方法 I・II の外部検証として位置づける。"),
+      Pg(f"<b>週次満期の取り込み。</b>日経225ミニオプション（水・金 SQ）は 2026-10-20 から IV を収集しており、満期ごとに「その満期の両気配が 60 本以上ある最も早い営業日の引け（残存 1.5 日以上）」を予測時点とする。"
+         f"実現値は JPX の週次 SQ 履歴 PDF から取る。現在、予測を作成済みで実現待ちの満期は {len(ML['pending'])} 本（{', '.join('SQ ' + x['sq_day'][4:6] + '/' + x['sq_day'][6:] for x in ML['pending'])}）。"
+         "月次の年 12 点に対し週次は年 100 点前後になるため、区間の縮小は週次の蓄積で決まる。日次ジョブ（gamma_mle.py）が毎営業日に更新する。"),
       Pg("6. 原資産価格との関係", H1), fig_relation(),
       TBL([["相関（方法 I の γ̂ と）", "値"],
            ["ln F（水準）", f"{rel['corr']['lnF']:+.2f}"], ["直近 20 日の対数リターン", f"{rel['corr']['ret20']:+.2f}"], ["RV₂₀", f"{rel['corr']['rv20']:+.2f}"], ["ATM IV", f"{rel['corr']['atm']:+.2f}"], ["IV ÷ RV₂₀", f"{rel['corr']['ivrv']:+.2f}"],
@@ -166,7 +173,7 @@ S += [Pg("7. 精度の評価と向上策", H1), Pg("7.1 誤差の源", H2),
            ["中央範囲の選び方", f"90% と 80% で平均 {abs(S_.gamma_I - S_.gamma_c80).mean():.2f} の差", "範囲を固定して「変化」を見る。曲率（2 次項）を併記"],
            ["f_Q の両翼（SVI の補外・気配の幅）", "5% 点より外で密度の誤差が大きい", "中央範囲に限定（実施済み）。深い OTM の気配幅で重み付け"],
            ["気配時刻", "引け前後で IV が動く。夜間の気配を混ぜると不連続", "気配時刻 15:30:59 以前の最終に統一（実施済み）。収集を 16:15 まで延長（実施済み）"],
-           ["標本数（方法 III）", f"{mle['profile_28d']['n']} 限月では区間が γ = 0 を含む", "月次限月の蓄積（年 12 点）。週次満期の IV を収集できれば年 100 点超"]], [52, 62, 64]),
+           ["標本数（方法 III）", f"{ML['profile_monthly']['n']} 限月では区間が格子全体に及ぶ", "月次限月の蓄積（年 12 点）。週次満期の IV を収集できれば年 100 点超"]], [52, 62, 64]),
       Pg("7.2 ブートストラップによる標準誤差（最終日）", H2),
       Pg(f"f_P の標本（歴史的 n 日リターン）をブロック長 {boot['block']} 日で {boot['n']} 回再抽出して γ̂ を再計算した結果、平均 {boot['mean']:.2f}、標準誤差 {boot['sd']:.2f}、95% 区間 {boot['lo']:.2f}〜{boot['hi']:.2f}。"
          "歴史的分布の標本誤差だけでこの幅があり、設定の違い（7.1）を加えると不確実性はさらに大きい。日次の γ̂ は小数第 1 位までの精度と考える。"),
