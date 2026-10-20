@@ -2,7 +2,7 @@
 
 時刻の扱い: QRI の配信は 15 分遅延で、スナップショットの source_update_time が気配の時刻。
 日中立会は 08:45-15:45、夜間立会は 17:00-翌 06:00。「引け」のスナップショットは
-source_update_time が 15:45:59 以前の最終（両気配が十分あるもの）とし、夜間の気配を混ぜない。
+source_update_time が 15:30:59 以前の最終（両気配が十分あるもの）とし、夜間の気配を混ぜない。
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from data.qri_iv_loader import load_snapshot, prefetch_snapshots  # noqa: E402
 SQ_DATES = {"2606": pd.Timestamp("2026-06-12 09:00"), "2607": pd.Timestamp("2026-07-10 09:00"), "2608": pd.Timestamp("2026-08-14 09:00"),
             "2609": pd.Timestamp("2026-09-11 09:00"), "2610": pd.Timestamp("2026-10-09 09:00"), "2611": pd.Timestamp("2026-11-13 09:00"),
             "2612": pd.Timestamp("2026-12-11 09:00"), "2701": pd.Timestamp("2027-01-08 09:00"), "2703": pd.Timestamp("2027-03-12 09:00")}
-DAY_CLOSE, NIGHT_CLOSE = "15:45:59", "06:00:59"
+DAY_CLOSE, NIGHT_CLOSE = "15:30:59", "06:00:59"  # 15:30 以降はマーケットメイカーが気配を引くため IV が歪む（ユーザー指示 2026-10-20）
 PRICE_OK_FROM = "20260713"  # これより前の収集分は 4 桁以上の価格が下位桁欠落（IV・デルタは無事）
 
 
@@ -49,7 +49,7 @@ def snap_for(day: str, max_t: str, cm: str, min_two_sided: int = 150, by_source:
 
 
 def day_close_snap(day: str, cm: str, min_two_sided: int = 150) -> str | None:
-    """日中引け（気配時刻 08:45〜15:45:59）の最終スナップショット。夜間立会（17:00〜翌06:00）の気配は使わない。"""
+    """日中引け（気配時刻 08:45〜15:30:59）の最終スナップショット。夜間立会（17:00〜翌06:00）の気配は使わない。"""
     return snap_for(day, DAY_CLOSE, cm, min_two_sided, by_source=True, min_t="08:45:00")
 
 

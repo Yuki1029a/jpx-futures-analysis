@@ -44,7 +44,7 @@ TMP = Path(os.environ["TMP"])
 J = json.load(open(TMP / "rnd.json"))
 Z = np.load(TMP / "rnd.npz", allow_pickle=True)
 PDF_PATH = OUT_DIR / "nk225op_2611_sq_rnd_report.pdf"
-CM, SQ_DATE, OI_DATE = "2611", "2026-11-13", date(2026, 10, 19)
+CM, SQ_DATE, OI_DATE = "2611", "2026-11-13", date(2026, 10, 20)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rnd_lib import day_close_snap, rr_delta as rr_delta_key, source_time, stats as rnd_stats, tilt as rnd_tilt  # noqa: E402
 GAMMA_JSON = TMP / "gcalc" / "gamma_calc.json"
@@ -77,7 +77,7 @@ def rr_delta(day, mt):
     return (np.interp(-0.25, p_.delta, p_.eff_iv) - np.interp(0.25, c_.delta, c_.eff_iv)) * 100
 
 
-_days = ["20261009", "20261013", "20261014", "20261015", "20261016", "20261019"][-len(ev):]
+_days = ["20261009", "20261013", "20261014", "20261015", "20261016", "20261019", "20261020"][-len(ev):]
 ev["RR25(Δ基準)"] = [round(rr_delta_key(day_close_snap(d, CM), CM), 2) for d in _days]
 
 
@@ -107,8 +107,9 @@ src_time = (source_time(ks[0]) or snap_ts.strftime("%H:%M:%S"))[:5]
 m = iv_views.with_eff_iv(load_snapshot(ks[0])); g = m[m.contract_month == CM].copy()
 # べき効用による実確率の近似（第 8 章）と市場の γ（gamma_calc.py の出力があれば）
 _dK = np.gradient(K); _mQ = fK * _dK; _mQ = _mQ / _mQ.sum()
-GAM = json.load(open(GAMMA_JSON)) if GAMMA_JSON.exists() else None
-gamma_hat = GAM["latest"]["gamma"] if GAM and GAM["latest"]["day"] == snap_ts.strftime("%Y%m%d") else None
+_gstore = Path(__file__).resolve().parent.parent / "cache" / "derived" / "gamma_daily.jsonl"  # 日次蓄積（gamma_daily.py）から当日の γ̂ を取る
+_grow = next((json.loads(l) for l in _gstore.read_text(encoding="utf-8").splitlines()[::-1] if l.strip() and json.loads(l)["day"] == snap_ts.strftime("%Y%m%d")), None) if _gstore.exists() else None
+gamma_hat = _grow["gamma_I"] if _grow else None; gamma_II = _grow["gamma_II"] if _grow else None
 TILT_ROWS = []
 for g_ in [0.0, 2.0, 4.0, 6.0] + ([round(gamma_hat, 2)] if gamma_hat is not None else []):
     stt = rnd_stats(K, rnd_tilt(K, fK, g_))
@@ -322,7 +323,7 @@ S += [sp(10), Pg("日経225オプション 2026年11月限<br/>SQ値の織り込
       Pg("オプション価格から導いたリスク中立分布と、建玉の位置づけ", SUB),
       TBL([["項目", "内容"],
            ["分析対象", "日経225オプション 2026年11月限（SQ算出日 2026-11-13、最終取引日 2026-11-12）"],
-           ["価格データ", f"QRI 配信の気配・IV スナップショット {snap_ts:%Y-%m-%d %H:%M}（配信は 15 分遅延。気配時刻 {src_time} は日中立会 08:45〜15:45 内の最終。夜間立会の気配は使わない）"],
+           ["価格データ", f"QRI 配信の気配・IV スナップショット {snap_ts:%Y-%m-%d %H:%M}（配信は 15 分遅延。気配時刻 {src_time} は日中立会 08:45〜15:30 内の最終。夜間立会の気配は使わない）"],
            ["建玉データ", f"JPX 建玉残高表 {OI_DATE:%Y-%m-%d} 引け分（別紙1、行使価格別・プット/コール別）"],
            ["先物価格の推定値", f"F = {fmt(F)} 円（プット・コール・パリティから推定。第3.3節）"],
            ["残存期間", f"{T*365:.1f} 暦日（SQ算出時刻 11/13 9:00 まで）"],
@@ -531,7 +532,7 @@ S += [Pg("6. 建玉との突合", H1), Pg("6.1 建玉が示すもの、示さな
 # ================================================================== 7 推移
 ev2 = ev.copy()
 S += [Pg("7. 織り込みの推移（10月SQ 以降）", H1),
-      Pg("11月限が期近になった 10/9（10月限 SQ 日）以降、各営業日の引け近傍（気配時刻が 08:45〜15:45:59 の最終スナップショット。夜間立会は含めない）で同じ手順を繰り返した。"), fig_evol(),
+      Pg("11月限が期近になった 10/9（10月限 SQ 日）以降、各営業日の引け近傍（気配時刻が 08:45〜15:30:59 の最終スナップショット。夜間立会は含めない）で同じ手順を繰り返した。"), fig_evol(),
       TBL([["時点", "F（円）", "ATM IV", "RR25", "5% 点", "50% 点", "95% 点", "標準偏差", "歪度", "P(≥70,000)", "P(<65,000)", "当てはめ誤差"]] +
           [[r["day"], fmt(r["F"]), f"{r['atm']:.1f}%", f"{r['RR25(Δ基準)']:+.1f}", fmt(r["q05"]), fmt(r["q50"]), fmt(r["q95"]), fmt(r["sd"]), f"{r['skew']:+.2f}", f"{r['p_gt70k']:.0f}%", f"{r['p_lt65k']:.0f}%", f"{r['rmse']:.2f}pt"] for r in ev2.to_dict("records")], [17, 15, 13, 12, 15, 15, 15, 14, 12, 16, 16, 14]),
       Pg("表9  推移。RR25 は QRI のデルタから直接補間した値（10/14〜15 は SVI 由来の値が当てはめ誤差の影響を受けるため）。", CAP),
@@ -564,7 +565,7 @@ S += [Pg("7. 織り込みの推移（10月SQ 以降）", H1),
          "γ の推定値は日々変動し、推定法によっても差がある（モーメント法では 2〜3）。実確率の帯としては γ = 0 と γ = 4 の両端を併記して読むのが現実的である。"),
       # ================================================================== 9 限界
       Pg("9. 限界", H1),
-      Pg(f"・スナップショットは 15 分遅延であり、日中立会の気配時刻 {src_time} の気配に基づく（引け 15:45 までの最終）。夜間立会以降の変動は含まない。建玉は同日引け分（20:00 公表）である。"),
+      Pg(f"・スナップショットは 15 分遅延であり、日中立会の気配時刻 {src_time} の気配に基づく（15:30 までの最終。15:30 以降はマーケットメイカーが気配を引くため使わない）。夜間立会以降の変動は含まない。建玉は同日引け分（20:00 公表）である。"),
       Pg("・両翼（5% 点より下、95% 点より上）の気配は幅が広く、SVI は両翼が直線的に伸びる形を仮定している。1% 点と 99% 点は ±2,000 円程度の推定誤差を見込む。"),
       Pg("・SVI は 5 パラメータの近似であり、特定の行使価格に固有の需給（局所的な歪み）は平滑化されて密度に現れない。"),
       Pg("・SQ値は構成銘柄の始値から算出されるため、最終取引日の先物終値や寄り付きの先物価格とは乖離し得る。本書の分布は SQ値そのものの分布である。"),

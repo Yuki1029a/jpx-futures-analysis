@@ -22,7 +22,7 @@ rows = []
 for d in days:
     wd = pd.Timestamp(d).weekday()
     if wd < 5:
-        k = day_close_snap(d, cm)  # 気配時刻 15:45:59 以前の最終（夜間の気配は使わない）
+        k = day_close_snap(d, cm)  # 気配時刻 15:30:59 以前の最終（夜間の気配は使わない）
         if k:
             r = analyze_key(k, cm); r["label"] = f"{d[4:6]}/{d[6:8]} 引け"; rows.append(r); print(r["label"], r["ts"], round(r["F"]), round(r["atm"] * 100, 2), flush=True)
 # 最終営業日の夜間引け（翌暦日の 06:00:59 以前、気配時刻基準）は参考値として末尾に付ける
