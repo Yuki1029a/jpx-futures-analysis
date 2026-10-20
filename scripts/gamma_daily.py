@@ -38,9 +38,27 @@ XS = np.linspace(-0.6, 0.6, 6001)
 
 
 def nikkei_close() -> pd.Series:
+    """日経平均の日次終値。yfinance が取れた日は cache/derived/n225_close.csv に保存し、レート制限時はそのキャッシュを使う。"""
     import yfinance as yf
-    h = yf.download("^N225", start="1999-06-01", progress=False, auto_adjust=False); h.columns = [c[0] if isinstance(c, tuple) else c for c in h.columns]
-    return h.Close
+    cache = Path(__file__).resolve().parent.parent / "cache" / "derived" / "n225_close.csv"
+    try:
+        h = yf.download("^N225", start="1999-06-01", progress=False, auto_adjust=False); h.columns = [c[0] if isinstance(c, tuple) else c for c in h.columns]
+        s = h.Close.dropna()
+        if len(s) > 1000:
+            cache.parent.mkdir(parents=True, exist_ok=True); s.to_csv(cache, header=["Close"]); return s
+    except Exception as e:  # noqa: BLE001
+        print("yfinance failed:", e)
+    try:  # 代替ソース: stooq（^NKX = 日経平均）
+        import requests
+        r = requests.get("https://stooq.com/q/d/l/?s=^nkx&i=d", timeout=30, headers={"User-Agent": "Mozilla/5.0"}); r.raise_for_status()
+        h = pd.read_csv(io.StringIO(r.text), index_col=0, parse_dates=True); s = h["Close"].dropna(); s = s[s.index >= "1999-06-01"]
+        if len(s) > 1000:
+            cache.parent.mkdir(parents=True, exist_ok=True); s.to_csv(cache, header=["Close"]); print(f"using stooq N225 close through {s.index[-1].date()}"); return s
+    except Exception as e:  # noqa: BLE001
+        print("stooq failed:", e)
+    if cache.exists():
+        s = pd.read_csv(cache, index_col=0, parse_dates=True)["Close"]; print(f"using cached N225 close through {s.index[-1].date()}"); return s
+    raise RuntimeError("N225 close unavailable (yfinance failed, no cache)")
 
 
 def compute(day: str, phys: Physical) -> dict | None:
