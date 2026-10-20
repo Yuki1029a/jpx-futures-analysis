@@ -25,27 +25,34 @@ G = json.load(open(CALC / "gamma_calc.json")); ML = json.load(open(CALC / "gamma
 S_["day"] = S_.day.astype(str); S_["date"] = pd.to_datetime(S_.day); S_ = S_[S_.ts.str[11:13].astype(int) >= 8].reset_index(drop=True)  # 夜間のみの日を除外
 rel, boot, mle, lat = G["series_summary"], G["boot"], G["mle"], G["latest"]
 last = S_.iloc[-1]; VAR = ["gamma_I", "gamma_rv60", "gamma_c80", "gamma_bw"]
+if "gamma_q" not in S_.columns:
+    S_["gamma_q"] = S_.gamma_I_quad; S_["beta2"] = S_.quad; S_["ivrv"] = S_.atm - S_.rv20
 pct = lambda v: f"{v*100:.1f}%"
 
 
 # ------------------------------------------------------------------ 図
 def fig_series():
-    fig, ax = plt.subplots(3, 1, figsize=(7.2, 7.4), sharex=True); d = S_.date
+    fig, ax = plt.subplots(4, 1, figsize=(7.2, 9.2), sharex=True); d = S_.date
     lo, hi = S_[VAR].min(axis=1), S_[VAR].max(axis=1)
-    ax[0].fill_between(d, lo, hi, color=B, alpha=0.18, label="変種（RV60 スケール・中央 80%・狭い帯域）の範囲")
-    ax[0].plot(d, S_.gamma_I, color=B, lw=1.8, label="γ̂（方法 I：カーネル法、基準設定）"); ax[0].plot(d, S_.gamma_II, color=O, lw=1.2, ls="--", label="γ̂（方法 II：モーメント法）")
-    ax[0].axhline(0, color=MUT, lw=0.8); ax[0].set_ylim(min(-1, float(lo.min()) - 0.3), max(6, float(S_.gamma_II.quantile(0.95)) + 0.5))
-    style_ax(ax[0], "図1  市場が織り込むリスク回避度 γ の日次推定（期近限月、引け）", "", "γ"); ax[0].legend(fontsize=7.5, frameon=False)
-    ax[1].plot(d, S_.F, color=INK, lw=1.6); style_ax(ax[1], "", "", "先物推定値 F（円）")
-    ax[2].plot(d, S_.atm * 100, color=B, lw=1.4, label="ATM IV"); ax[2].plot(d, S_.rv20 * 100, color=O, lw=1.4, label="RV₂₀"); style_ax(ax[2], "", "", "%"); ax[2].legend(fontsize=7.5, frameon=False)
+    ax[0].fill_between(d, lo, hi, color=MUT, alpha=0.12, label="参考: 直線 γ̂ の変種（RV60・中央 80%・狭い帯域）の範囲")
+    ax[0].plot(d, S_.gamma_q, color=B, lw=2.0, label="γ̂_q（主指標：2 次式の傾き、ATM 近傍の局所 γ）")
+    ax[0].plot(d, S_.gamma_I, color=MUT, lw=1.0, label="参考: 直線の γ̂（方法 I 基準設定）"); ax[0].plot(d, S_.gamma_II, color=O, lw=1.0, ls="--", label="参考: 方法 II（モーメント法）")
+    ax[0].axhline(0, color=MUT, lw=0.8); ax[0].set_ylim(min(-2, float(S_.gamma_q.min()) - 0.3), max(6, float(S_.gamma_II.quantile(0.95)) + 0.5))
+    style_ax(ax[0], "図1  市場が織り込む γ の日次推定（期近限月、引け）", "", "γ"); ax[0].legend(fontsize=7, frameon=False)
+    ax[1].plot(d, S_.beta2, color=B, lw=2.0, label="β₂（主指標：曲率、左軸）"); a2 = ax[1].twinx(); a2.plot(d, S_.ivrv * 100, color=O, lw=1.1, label="ATM IV − RV₂₀（%pt、右軸）"); a2.tick_params(colors=MUT, labelsize=8)
+    ax[1].axhline(0, color=MUT, lw=0.8); style_ax(ax[1], "", "", "β₂"); h1, l1 = ax[1].get_legend_handles_labels(); h2, l2 = a2.get_legend_handles_labels(); ax[1].legend(h1 + h2, l1 + l2, fontsize=7, frameon=False)
+    ax[2].plot(d, S_.F, color=INK, lw=1.6); style_ax(ax[2], "", "", "先物推定値 F（円）")
+    ax[3].plot(d, S_.atm * 100, color=B, lw=1.4, label="ATM IV"); ax[3].plot(d, S_.rv20 * 100, color=O, lw=1.4, label="RV₂₀"); style_ax(ax[3], "", "", "%"); ax[3].legend(fontsize=7.5, frameon=False)
     fig.autofmt_xdate()
     return fig_to_img(fig)
 
 
 def fig_kernel():
     x, lnM = L["xsel"], L["lnM"]; a_, g_ = lat["a"], lat["gamma"]
+    w = np.interp(x, L["x"], L["fQ"] * np.gradient(L["x"])); c2 = np.polyfit(x, lnM, 2, w=np.sqrt(np.clip(w, 1e-12, None)))  # 2 次式（重み = f_Q 質量）
     fig, ax = plt.subplots(1, 2, figsize=(7.2, 3.0))
-    ax[0].plot(x * 100, lnM, color=B, lw=1.8, label="ln[f_Q(x)/f_P(x)]（観測）"); ax[0].plot(x * 100, a_ - g_ * x, color=O, lw=1.4, ls="--", label=f"直線当てはめ（γ̂ = {g_:.2f}）")
+    ax[0].plot(x * 100, lnM, color=INK, lw=1.8, label="ln[f_Q(x)/f_P(x)]（観測）"); ax[0].plot(x * 100, np.polyval(c2, x), color=B, lw=1.6, label=f"2 次式（主指標）: 傾き γ̂_q = {-c2[1]:+.2f}、曲率 β₂ = {c2[0]:+.1f}")
+    ax[0].plot(x * 100, a_ - g_ * x, color=MUT, lw=1.1, ls="--", label=f"参考: 直線（γ̂ = {g_:+.2f}）")
     style_ax(ax[0], f"図2a  対数プライシング・カーネル（{lat['day'][4:6]}/{lat['day'][6:]} 引け）", "x = ln(K/F)（%）", "ln M + 定数"); ax[0].legend(fontsize=7, frameon=False)
     K = L["K"]; sel = (K >= 0.78 * lat["F"]) & (K <= 1.2 * lat["F"]); xg = L["x"]
     ax[1].plot(K[sel], (L["fQ"] / K)[sel] * 1e5, color=B, lw=1.8, label="f_Q（オプション）"); ax[1].plot(K[sel], (L["fP"] / K)[sel] * 1e5, color=MUT, lw=1.4, ls="--", label="f_P（歴史的リターン、現在の RV で再スケール）")
@@ -55,9 +62,11 @@ def fig_kernel():
 
 
 def fig_relation():
-    fig, ax = plt.subplots(1, 2, figsize=(7.2, 3.0))
-    ax[0].scatter(S_.ret20 * 100, S_.gamma_I, s=14, color=B); style_ax(ax[0], "図3a  γ̂ と直近 20 日リターン", "20 日対数リターン（%）", "γ̂")
-    ax[1].scatter(S_.rv20 * 100, S_.gamma_I, s=14, color=O); style_ax(ax[1], "図3b  γ̂ と実現ボラティリティ RV₂₀", "RV₂₀（%）", "γ̂")
+    fig, ax = plt.subplots(2, 2, figsize=(7.2, 5.6)); ax = ax.ravel()
+    ax[0].scatter(S_.ret20 * 100, S_.gamma_q, s=14, color=B); style_ax(ax[0], "図3a  γ̂_q と直近 20 日リターン", "20 日対数リターン（%）", "γ̂_q")
+    ax[1].scatter(S_.rv20 * 100, S_.gamma_q, s=14, color=B); style_ax(ax[1], "図3b  γ̂_q と実現ボラティリティ RV₂₀", "RV₂₀（%）", "γ̂_q")
+    ax[2].scatter(S_.ivrv * 100, S_.beta2, s=14, color=O); style_ax(ax[2], "図3c  曲率 β₂ と ATM IV − RV₂₀", "ATM IV − RV₂₀（%pt）", "β₂")
+    ax[3].scatter(S_.ret20 * 100, S_.beta2, s=14, color=O); style_ax(ax[3], "図3d  曲率 β₂ と直近 20 日リターン", "20 日対数リターン（%）", "β₂")
     for a_ in ax:
         a_.axhline(0, color=MUT, lw=0.8)
     fig.tight_layout()
@@ -82,20 +91,21 @@ S += [sp(8), Pg("市場が織り込むリスク回避度 γ の推定", TITLE), 
       TBL([["項目", "内容"],
            ["対象", f"日経225オプション期近限月、各営業日の日中引け（気配時刻 15:30:59 以前の最終）。{S_.day.iloc[0]} 〜 {S_.day.iloc[-1]}（{len(S_)} 営業日）"],
            ["γ の意味", "代表的投資家のべき効用 U(S) = S^(1−γ)/(1−γ) の相対的リスク回避度。オプション価格が内包する保険料の大きさを一つの数に要約する"],
-           ["推定法", "I. カーネル法（リスク中立密度 ÷ 歴史的密度の対数を x に回帰）、II. モーメント法（歪度と尖度の関係）、III. 最尤法（実現 SQ 値の尤度）"],
+           ["主指標", "対数プライシング・カーネル ln(f_Q/f_P) の 2 次式当てはめ（中央 5〜95%、重み = f_Q 質量）の <b>傾き γ̂_q</b>（ATM 近傍の局所リスク回避度）と <b>曲率 β₂</b>（両裾の保険料 = ボラティリティ・プレミアム）。直線の γ̂ は参考値"],
+           ["推定法", "I. カーネル法（リスク中立密度 ÷ 歴史的密度の対数を x に回帰。主指標は 2 次式）、II. モーメント法（歪度と尖度の関係）、III. 最尤法（実現 SQ 値の尤度）"],
            ["データ", "QRI スナップショット（R2、2026-06〜）、日経平均日次終値（2000-01〜、Yahoo Finance）、JPX 最終清算数値（sq_his.pdf）"],
            ["作成", f"{date.today():%Y-%m-%d}、先物手口分析ワークスペース（scripts/gamma_calc.py, scripts/build_gamma_report.py）"]], [30, 148]),
       sp(5), Pg("要約", H1),
-      Pg(f"・方法 I による γ̂ の日次系列は平均 {rel['mean']:.2f}、中央値 {rel['median']:.2f}、10〜90% 点 {rel['q10']:.2f}〜{rel['q90']:.2f}、直近（{last.day[4:6]}/{last.day[6:]}）{last.gamma_I:.2f}。"
-         f"文献の代表値（Bliss–Panigirtzoglou の 4 前後）より小さい。方法 II の平均は {rel['mean_II']:.2f} で、方法 I との相関は {rel['corr']['gII']:+.2f}。"),
-      Pg(f"・対数プライシング・カーネルは直線（べき効用）で十分に表せない。直線の決定係数は平均 {S_.r2.mean():.2f} で、2 次項が一貫して負（平均 {S_.quad.mean():.1f}）である。"
-         "すなわち、中心付近では保険料が小さく、両裾で急に大きくなる形をしている。γ を一つの数で表すときは「中央 90% の範囲での平均的な傾き」と理解する必要がある。"),
-      Pg(f"・原資産との関係：γ̂ は直近 20 日リターンと相関 {rel['corr']['ret20']:+.2f}、実現ボラティリティと {rel['corr']['rv20']:+.2f}、IV÷RV と {rel['corr']['ivrv']:+.2f}。"
-         f"{'下落・高ボラ局面で γ̂ が上がる（反循環的なリスク回避）傾向が見える' if rel['corr']['ret20'] < -0.2 else '4 か月の標本では価格水準との安定した関係は確認できない'}。"
-         f"先行性（γ̂ と次の 5・10・20 営業日のリターンの相関）は {rel['fwd_corr']['5']:+.2f} / {rel['fwd_corr']['10']:+.2f} / {rel['fwd_corr']['20']:+.2f} で、標本が少なく結論は出せない。"),
-      Pg(f"・精度：方法 I の設定の違い（RV60 でのスケール、中央 80%、狭い帯域）による γ̂ の幅は 1 日あたり平均 {rel['variant_spread']:.2f}。最終日のブロック・ブートストラップでは標準誤差 {boot['sd']:.2f}（95% 区間 {boot['lo']:.2f}〜{boot['hi']:.2f}）。"
+      Pg(f"・主指標（2 次式の傾き γ̂_q）の日次系列は平均 {rel['mean']:+.2f}、中央値 {rel['median']:+.2f}、10〜90% 点 {rel['q10']:+.2f}〜{rel['q90']:+.2f}、直近（{last.day[4:6]}/{last.day[6:]}）{last.gamma_q:+.2f}。"
+         f"文献の代表値（Bliss–Panigirtzoglou の 4 前後）より小さい。参考の直線 γ̂ は平均 {rel['lin']['mean']:+.2f}（主指標との相関 {rel['corr_q_lin']:+.2f}）、方法 II の平均は {rel['mean_II']:.2f}。"),
+      Pg(f"・曲率 β₂ は平均 {rel['b2']['mean']:+.1f}、中央値 {rel['b2']['median']:+.1f}（10〜90% 点 {rel['b2']['q10']:+.1f}〜{rel['b2']['q90']:+.1f}、直近 {last.beta2:+.1f}）。符号は局面で変わり、ATM IV > RV₂₀ のとき正（U 字：中心付近では保険料が小さく両裾で急に大きくなる）、急落直後に RV₂₀ が IV を上回ると負（山型）になる。"
+         f"β₂ は ATM IV − RV₂₀ と相関 {rel['b2']['corr']['ivrv']:+.2f} で動き、正規近似の β₂ = ½(1/s_P² − 1/s_Q²) が示す通り「リスク中立分布がヒストリカルより広い」＝ボラティリティ・プレミアムの密度表現である。"
+         "直線の γ̂ は U 字のどこを重く見るかで値が変わる（重み依存）ため参考値に格下げした。"),
+      Pg(f"・原資産との関係：γ̂_q は直近 20 日リターンと相関 {rel['corr']['ret20']:+.2f}、実現ボラティリティと {rel['corr']['rv20']:+.2f}、ATM IV と {rel['corr']['atm']:+.2f}。曲率 β₂ は 20 日リターンと {rel['b2']['corr']['ret20']:+.2f}、RV₂₀ と {rel['b2']['corr']['rv20']:+.2f}。"
+         f"先行性（γ̂_q と次の 5・10・20 営業日のリターンの相関）は {rel['fwd_corr']['5']:+.2f} / {rel['fwd_corr']['10']:+.2f} / {rel['fwd_corr']['20']:+.2f}、β₂ では {rel['b2']['fwd_corr']['5']:+.2f} / {rel['b2']['fwd_corr']['10']:+.2f} / {rel['b2']['fwd_corr']['20']:+.2f} で、標本が少なく結論は出せない。"),
+      Pg(f"・精度：最終日のブロック・ブートストラップでは γ̂_q の標準誤差 {boot['sd']:.2f}（95% 区間 {boot['lo']:+.2f}〜{boot['hi']:+.2f}）、β₂ の標準誤差 {boot['b2']['sd']:.1f}（{boot['b2']['lo']:+.1f}〜{boot['b2']['hi']:+.1f}）。参考の直線 γ̂ は設定の違い（RV60・中央 80%・狭い帯域）で 1 日あたり平均 {rel['variant_spread']:.2f} 動く。"
          f"最尤法（方法 III、月次 {ML['profile_monthly']['n']} 限月、格子 −6〜12）の γ̂ は {ML['profile_all']['gamma_hat']:+.2f} だが、95% 区間は {ML['profile_all']['ci_lo']:+.1f}〜{ML['profile_all']['ci_hi']:+.1f} と格子全体に及び、現時点では情報量が乏しい。週次満期（ミニ）の取り込みを開始し、実現待ち {len(ML['pending'])} 本。"),
-      Pg("・目下の方針：γ̂（方法 I）とその変種、カーネルの 2 次項、方法 II、F、RV、IV を日次で蓄積し、満期ごとに実現 SQ の尤度（方法 III）を積み上げる。1 年で方法 III の区間が実用的な幅に縮む見込み（第 8 章）。"),
+      Pg("・目下の方針：主指標 γ̂_q・β₂ を筆頭に、参考値（直線 γ̂ とその変種、方法 II）、F、RV、IV、IV−RV を日次で蓄積し、満期ごとに実現 SQ の尤度（方法 III、週次満期を含む）を積み上げる。γ の水準は方法 III で、形状は γ̂_q・β₂ で決める分担とする（第 8 章）。"),
       sp(3), Pg("構成", H2), Pg("1. 問いの定義　2. 理論　3. データと実装　4. 結果 I：日次系列　5. 結果 II：最尤法　6. 原資産価格との関係　7. 精度の評価と向上策　8. 蓄積の設計　9. 留意点・参考文献", SMALL),
       PageBreak()]
 
@@ -122,26 +132,27 @@ S += [Pg("1. 問いの定義", H1),
       Pg("日経平均の日次終値（2000-01〜）から、残存期間に対応する n 営業日（n = T×250）の対数リターン r_n を作り、各期間の開始時点の実現ボラティリティ RV₂₀ で割って標準化する。これを現在の RV₂₀ で再スケールした標本 x_j = (r_n,j / RV₂₀,j) × RV₂₀,now を、"
          "ガウス・カーネル密度（Scott の帯域）で平滑化して f_P(x) とする。標準化により、ボラティリティ水準の違う過去の期間を現在の局面に揃えつつ、多日リターンの歪みと厚い裾（経験分布）を保つ。"),
       Pg("3.3 回帰（方法 I）", H2),
-      Pg("リスク中立の累積確率が 5〜95% の範囲で ln f_Q(x) − ln f_P(x) を x に回帰する（重み = f_Q の質量）。傾きの符号を反転した値が γ̂ である。2 次項を加えた回帰も行い、直線からの乖離（曲率）を記録する。"),
+      Pg("リスク中立の累積確率が 5〜95% の範囲で ln f_Q(x) − ln f_P(x) を x の 2 次式 c − γ_q x + β₂ x² に回帰する（重み = f_Q の質量）。主指標は <b>γ̂_q</b>（1 次項の符号反転、x = 0 すなわち ATM 近傍の局所リスク回避度）と <b>β₂</b>（曲率）である。"
+         "直線 c − γx の回帰も行い、参考値 γ̂ として記録する。直線の傾きは U 字のどの範囲を重く見るかで値が変わるため主指標にしない。"),
       Pg("3.4 精度の設計", H2),
       Pg("設定の違いによる変動（RV₆₀ での再スケール、中央 80% の範囲、狭い帯域）を毎日計算し、幅を記録する。最終日についてはブロック・ブートストラップ（ブロック長 = n 日、200 回）で標準誤差を求める。"),
       PageBreak()]
 
 S += [Pg("4. 結果 I：日次系列", H1), fig_series(),
-      TBL([["統計量（方法 I、基準設定）", "値"],
-           ["標本", f"{len(S_)} 営業日（{S_.day.iloc[0][:4]}-{S_.day.iloc[0][4:6]}-{S_.day.iloc[0][6:]} 〜 {S_.day.iloc[-1][:4]}-{S_.day.iloc[-1][4:6]}-{S_.day.iloc[-1][6:]}）"],
-           ["平均 / 中央値 / 標準偏差", f"{rel['mean']:.2f} / {rel['median']:.2f} / {rel['sd']:.2f}"],
-           ["10% 点 / 90% 点", f"{rel['q10']:.2f} / {rel['q90']:.2f}"],
-           ["1 日の自己相関", f"{rel['autocorr1']:.2f}"],
-           ["直線当てはめの決定係数（平均）", f"{S_.r2.mean():.2f}"],
-           ["2 次項（平均、負なら両裾で保険料が急増）", f"{S_.quad.mean():.1f}"],
-           ["方法 II の平均 / 方法 I との相関", f"{rel['mean_II']:.2f} / {rel['corr']['gII']:+.2f}"],
-           [f"直近 {last.day[4:6]}/{last.day[6:]}", f"γ̂_I = {last.gamma_I:.2f}（変種 {min(last[VAR]):.2f}〜{max(last[VAR]):.2f}）、γ̂_II = {last.gamma_II:.2f}、F = {fmt(last.F)}、ATM IV {last.atm*100:.1f}%、RV₂₀ {last.rv20*100:.1f}%"]], [80, 98]),
+      TBL([["統計量", "主指標 γ̂_q（2 次式の傾き）", "主指標 β₂（曲率）", "参考: 直線 γ̂"],
+           ["標本", f"{len(S_)} 営業日（{S_.day.iloc[0][:4]}-{S_.day.iloc[0][4:6]}-{S_.day.iloc[0][6:]} 〜 {S_.day.iloc[-1][:4]}-{S_.day.iloc[-1][4:6]}-{S_.day.iloc[-1][6:]}）", "", ""],
+           ["平均 / 中央値 / 標準偏差", f"{rel['mean']:+.2f} / {rel['median']:+.2f} / {rel['sd']:.2f}", f"{rel['b2']['mean']:+.1f} / {rel['b2']['median']:+.1f} / {rel['b2']['sd']:.1f}", f"{rel['lin']['mean']:+.2f} / {rel['lin']['median']:+.2f} / {rel['lin']['sd']:.2f}"],
+           ["10% 点 / 90% 点", f"{rel['q10']:+.2f} / {rel['q90']:+.2f}", f"{rel['b2']['q10']:+.1f} / {rel['b2']['q90']:+.1f}", f"{rel['lin']['q10']:+.2f} / {rel['lin']['q90']:+.2f}"],
+           ["1 日の自己相関", f"{rel['autocorr1']:.2f}", f"{rel['b2']['autocorr1']:.2f}", f"{rel['lin']['autocorr1']:.2f}"],
+           ["直線当てはめの決定係数（平均）", "", "", f"{S_.r2.mean():.2f}"],
+           ["方法 II の平均 / 相関", f"{rel['mean_II']:.2f} / {rel['corr']['gII']:+.2f}", f"— / {rel['b2']['corr']['gII']:+.2f}", f"— / {rel['lin']['corr']['gII']:+.2f}"],
+           [f"直近 {last.day[4:6]}/{last.day[6:]}", f"{last.gamma_q:+.2f}", f"{last.beta2:+.1f}", f"{last.gamma_I:+.2f}（変種 {min(last[VAR]):+.2f}〜{max(last[VAR]):+.2f}）"],
+           ["同日の市場", f"F = {fmt(last.F)}、ATM IV {last.atm*100:.1f}%、RV₂₀ {last.rv20*100:.1f}%、IV−RV {last.ivrv*100:+.1f}%pt、γ̂_II = {last.gamma_II:.2f}", "", ""]], [40, 50, 40, 48]),
       Pg("表1  日次系列の要約。", CAP), fig_kernel(),
-      Pg(f"図2a は最終日の対数カーネルである。中央部では傾きが緩く、両端で急に立ち上がる。直線で近似した傾き（γ̂ = {lat['gamma']:.2f}）は、この曲線の「中央 90% の平均的な傾き」に過ぎない。"
+      Pg(f"図2a は最終日の対数カーネルである。中央部では傾きが緩く、両端で急に立ち上がる。2 次式の傾き γ̂_q = {lat['gamma_q']:+.2f} が ATM 近傍の局所リスク回避度、曲率 β₂ = {lat['beta2']:+.1f} が両裾の保険料である。直線で近似した傾き（γ̂ = {lat['gamma']:+.2f}）は、この曲線の「中央 90% の平均的な傾き」に過ぎない。"
          "この形は米国株でも繰り返し報告されており（Jackwerth 2000、Aït-Sahalia and Lo 2000 の「プライシング・カーネル・パズル」）、べき効用では説明できない。"
          "実務上の含意は、保険料を一つの γ で取り除くと、中央部では取り過ぎ、両裾では取り足りない、ということである。"),
-      Pg(f"方法 II（モーメント法）の γ̂ は平均 {rel['mean_II']:.2f} と方法 I より{'大きい' if rel['mean_II'] > rel['mean'] else '小さい'}。モーメント法は両裾の厚さ（尖度）の差を γ に押し込めるため、裾の保険料が大きい局面で高く出る。"
+      Pg(f"方法 II（モーメント法）の γ̂ は平均 {rel['mean_II']:.2f} と γ̂_q より{'大きい' if rel['mean_II'] > rel['mean'] else '小さい'}。モーメント法は両裾の厚さ（尖度）の差を γ に押し込めるため、裾の保険料が大きい局面で高く出る。"
          "二つの方法の差そのものが「べき効用で表せない部分」の大きさの目安になる。"),
       PageBreak(),
       Pg("5. 結果 II：最尤法（実現 SQ 値による検証）", H1), fig_mle(),
@@ -156,14 +167,18 @@ S += [Pg("4. 結果 I：日次系列", H1), fig_series(),
          f"実現値は JPX の週次 SQ 履歴 PDF から取る。現在、予測を作成済みで実現待ちの満期は {len(ML['pending'])} 本（{', '.join('SQ ' + x['sq_day'][4:6] + '/' + x['sq_day'][6:] for x in ML['pending'])}）。"
          "月次の年 12 点に対し週次は年 100 点前後になるため、区間の縮小は週次の蓄積で決まる。日次ジョブ（gamma_mle.py）が毎営業日に更新する。"),
       Pg("6. 原資産価格との関係", H1), fig_relation(),
-      TBL([["相関（方法 I の γ̂ と）", "値"],
-           ["ln F（水準）", f"{rel['corr']['lnF']:+.2f}"], ["直近 20 日の対数リターン", f"{rel['corr']['ret20']:+.2f}"], ["RV₂₀", f"{rel['corr']['rv20']:+.2f}"], ["ATM IV", f"{rel['corr']['atm']:+.2f}"], ["IV ÷ RV₂₀", f"{rel['corr']['ivrv']:+.2f}"],
-           ["次の 5 / 10 / 20 営業日のリターン（先行性）", f"{rel['fwd_corr']['5']:+.2f} / {rel['fwd_corr']['10']:+.2f} / {rel['fwd_corr']['20']:+.2f}（n = {rel['fwd_n']['5']} / {rel['fwd_n']['10']} / {rel['fwd_n']['20']}）"],
-           ["回帰 γ̂ = a + b·ret20 + c·RV₂₀", f"a = {rel['reg']['const']:.2f}、b = {rel['reg']['ret20']:.2f}、c = {rel['reg']['rv20']:.2f}"]], [90, 88]),
-      Pg("表3  γ̂ と原資産・ボラティリティの関係（2026-06〜10、重複標本のため相関の有意性は割り引いて読む）。", CAP),
-      Pg("理論的には、習慣形成モデル（Campbell and Cochrane 1999）のように下落後にリスク回避が高まるなら、γ̂ は 20 日リターンと負、ボラティリティと正の相関を持つ。"
-         f"標本では ret20 との相関が {rel['corr']['ret20']:+.2f}、RV₂₀ との相関が {rel['corr']['rv20']:+.2f} である。ただし f_P を現在の RV で再スケールしているため、ボラティリティが急上昇した直後は f_P が広がって γ̂ が機械的に下がる側面がある（第 7 章）。"
-         "価格との関係を蓄積する際は、γ̂ と同時に RV₂₀、ATM IV、IV÷RV を保存し、ボラティリティ要因を制御した上で評価する。"),
+      TBL([["相関", "γ̂_q（2 次式の傾き）", "β₂（曲率）", "参考: 直線 γ̂"],
+           ["ln F（水準）", f"{rel['corr']['lnF']:+.2f}", f"{rel['b2']['corr']['lnF']:+.2f}", f"{rel['lin']['corr']['lnF']:+.2f}"],
+           ["直近 20 日の対数リターン", f"{rel['corr']['ret20']:+.2f}", f"{rel['b2']['corr']['ret20']:+.2f}", f"{rel['lin']['corr']['ret20']:+.2f}"],
+           ["RV₂₀", f"{rel['corr']['rv20']:+.2f}", f"{rel['b2']['corr']['rv20']:+.2f}", f"{rel['lin']['corr']['rv20']:+.2f}"],
+           ["ATM IV", f"{rel['corr']['atm']:+.2f}", f"{rel['b2']['corr']['atm']:+.2f}", f"{rel['lin']['corr']['atm']:+.2f}"],
+           ["ATM IV − RV₂₀", f"{rel['corr']['ivrv']:+.2f}", f"{rel['b2']['corr']['ivrv']:+.2f}", f"{rel['lin']['corr']['ivrv']:+.2f}"],
+           ["次の 5 / 10 / 20 営業日のリターン（先行性）", f"{rel['fwd_corr']['5']:+.2f} / {rel['fwd_corr']['10']:+.2f} / {rel['fwd_corr']['20']:+.2f}", f"{rel['b2']['fwd_corr']['5']:+.2f} / {rel['b2']['fwd_corr']['10']:+.2f} / {rel['b2']['fwd_corr']['20']:+.2f}", f"{rel['lin']['fwd_corr']['5']:+.2f} / {rel['lin']['fwd_corr']['10']:+.2f} / {rel['lin']['fwd_corr']['20']:+.2f}"],
+           ["回帰", f"γ̂_q = {rel['reg']['const']:+.2f} {rel['reg']['ret20']:+.2f}·ret20 {rel['reg']['rv20']:+.2f}·RV₂₀", f"β₂ = {rel['reg_b2']['const']:+.1f} {rel['reg_b2']['ivrv']:+.2f}·(IV−RV)[%pt]", ""]], [52, 48, 44, 34]),
+      Pg(f"表3  主指標と原資産・ボラティリティの関係（2026-06〜10、n = {rel['fwd_n']['5']} / {rel['fwd_n']['10']} / {rel['fwd_n']['20']}。重複標本のため相関の有意性は割り引いて読む）。", CAP),
+      Pg("理論的には、習慣形成モデル（Campbell and Cochrane 1999）のように下落後にリスク回避が高まるなら、γ̂_q は 20 日リターンと負、ボラティリティと正の相関を持つ。"
+         f"標本では ret20 との相関が {rel['corr']['ret20']:+.2f}、RV₂₀ との相関が {rel['corr']['rv20']:+.2f} である。ただし f_P を現在の RV で再スケールしているため、ボラティリティが急上昇した直後は f_P が広がって γ̂_q が機械的に下がる側面がある（第 7 章）。"
+         f"曲率 β₂ は IV − RV と相関 {rel['b2']['corr']['ivrv']:+.2f} で、正規近似 β₂ = ½(1/s_P² − 1/s_Q²) の通りボラティリティ・プレミアムの密度表現である。価格との関係を蓄積する際は、主指標と同時に RV₂₀、ATM IV、IV−RV を保存し、ボラティリティ要因を制御した上で評価する。"),
       PageBreak()]
 
 S += [Pg("7. 精度の評価と向上策", H1), Pg("7.1 誤差の源", H2),
@@ -175,20 +190,22 @@ S += [Pg("7. 精度の評価と向上策", H1), Pg("7.1 誤差の源", H2),
            ["気配時刻", "引け前後で IV が動く。夜間の気配を混ぜると不連続", "気配時刻 15:30:59 以前の最終に統一（実施済み）。収集を 16:15 まで延長（実施済み）"],
            ["標本数（方法 III）", f"{ML['profile_monthly']['n']} 限月では区間が格子全体に及ぶ", "月次限月の蓄積（年 12 点）。週次満期の IV を収集できれば年 100 点超"]], [52, 62, 64]),
       Pg("7.2 ブートストラップによる標準誤差（最終日）", H2),
-      Pg(f"f_P の標本（歴史的 n 日リターン）をブロック長 {boot['block']} 日で {boot['n']} 回再抽出して γ̂ を再計算した結果、平均 {boot['mean']:.2f}、標準誤差 {boot['sd']:.2f}、95% 区間 {boot['lo']:.2f}〜{boot['hi']:.2f}。"
-         "歴史的分布の標本誤差だけでこの幅があり、設定の違い（7.1）を加えると不確実性はさらに大きい。日次の γ̂ は小数第 1 位までの精度と考える。"),
+      Pg(f"f_P の標本（歴史的 n 日リターン）をブロック長 {boot['block']} 日で {boot['n']} 回再抽出して主指標を再計算した結果、γ̂_q は平均 {boot['mean']:+.2f}、標準誤差 {boot['sd']:.2f}、95% 区間 {boot['lo']:+.2f}〜{boot['hi']:+.2f}。"
+         f"β₂ は平均 {boot['b2']['mean']:+.1f}、標準誤差 {boot['b2']['sd']:.1f}、95% 区間 {boot['b2']['lo']:+.1f}〜{boot['b2']['hi']:+.1f}（参考の直線 γ̂ は {boot['lin']['lo']:+.2f}〜{boot['lin']['hi']:+.2f}）。"
+         "歴史的分布の標本誤差だけでこの幅があり、設定の違い（7.1）を加えると不確実性はさらに大きい。日次の γ̂_q は小数第 1 位までの精度と考える。"),
       Pg("7.3 向上策の優先順位", H2),
-      Pg("(1) 条件付き分散の予測で f_P をスケールする（RV₂₀ の機械的な遅れを除く）。(2) 方法 I・II・III を同じ日付で並べ、三者の乖離を監視する。(3) 2 次項を含むカーネルの形を記録し、γ を「中央の傾き」と「裾の増分」の二つの数に分ける。"
-         "(4) 満期ごとの実現値を蓄積し、方法 III の区間を縮める。(5) 週次満期（ミニ）の IV 収集を検討する。"),
+      Pg("(1) 条件付き分散の予測で f_P をスケールする（RV₂₀ の機械的な遅れを除く）。(2) 方法 I・II・III を同じ日付で並べ、三者の乖離を監視する。(3) γ を「ATM の傾き γ̂_q」と「裾の増分 β₂」の二つの数に分けて記録する（2026-10-21 実施、主指標化）。"
+         "(4) 満期ごとの実現値を蓄積し、方法 III の区間を縮める。(5) 週次満期（ミニ）の IV 収集（2026-10-20 開始）で方法 III の点数を年 100 本規模にする。"),
       Pg("8. 蓄積の設計", H1),
       TBL([["項目", "内容"],
            ["頻度・時点", "各営業日の日中引け（気配時刻 15:30:59 以前の最終スナップショット）。夜間立会の値は別列に参考保存"],
-           ["保存する列", "day, cm, ts, F, T, atm, rv20, rv60, iv_mf, rmse, p（SVI 5 パラメータ）, gamma_I, gamma_rv60, gamma_c80, gamma_bw, quad, r2, gamma_II, skew_q, kurt_q, skew_p, kurt_p, ret20"],
+           ["主指標の列", "gamma_q（2 次式の傾き = ATM 近傍の局所 γ）、beta2（曲率 = 両裾の保険料）、ivrv（ATM IV − RV₂₀）"],
+           ["参考・材料の列", "day, cm, ts, key, F, T, atm, rr25_delta, 分位点, p（SVI 5 パラメータ）, rmse, gamma_I, gamma_rv60, gamma_c80, gamma_bw, r2, gamma_II, s_q, s_p, skew_q, kurt_q, skew_p, kurt_p, rv20, rv60, ret20, tilt（γ = 0, 2, 4, 6 の要約）"],
            ["満期ごとの記録", "cm, 予測日, T, F, 分位点, 実現 SQ, u = Φ_Q(SQ), ln f_P(SQ; γ) の γ 格子（方法 III の積み上げ用）"],
-           ["保存先", "R2 の qri_iv/derived/ 配下に日次 JSON（既存の収集ジョブに追加）。本稿の scripts/gamma_calc.py をそのまま日次実行する"],
+           ["保存先", "R2 qri_iv/derived/gamma_daily.jsonl（scripts/gamma_daily.py、GitHub Actions の日次ジョブ）。方法 III は gamma_mle.json（scripts/gamma_mle.py）。本稿の全系列再計算は scripts/gamma_calc.py"],
            ["検証計画", "3 か月ごとに：γ̂ の分布、価格・ボラとの相関、方法 III のプロファイル尤度、PIT の一様性（Berkowitz 検定）を更新"]], [34, 144]),
       CondPageBreak(60 * mm), Pg("9. 留意点", H1),
-      Pg("・γ̂ は「べき効用が成り立つとしたときの中央部の傾き」であり、投資家のリスク回避度そのものではない。カーネルの曲率が大きい局面では一つの数で表すこと自体に無理がある。"),
+      Pg("・γ̂_q は「ATM 近傍での局所的な傾き」、β₂ は「両裾での保険料の増分」であり、いずれも投資家のリスク回避度そのものではない。β₂ が大きい局面では一つの γ で表すこと自体に無理があるため、直線の γ̂ は参考値に留める。"),
       Pg("・f_P は歴史的分布の再スケールという近似で、構造変化（市場制度、投資家構成）を反映しない。"),
       Pg("・4 か月の標本で、急落（8/19、10/15）が 2 回含まれる。統計量はこれらの日に引きずられる。"),
       sp(3), Pg("参考文献", H2),

@@ -2,8 +2,8 @@
 
   リスク中立分布の要約（F, T, ATM IV, RR25, 分位点, SVI パラメータ）
   べき効用で傾けた実確率の要約（γ = 0, 2, 4, 6）
-  市場が織り込む γ（方法 I カーネル法とその変種、曲率、方法 II モーメント法）
-  実確率側の材料（RV20, RV60, 20 日リターン）
+  市場が織り込む γ（主指標: 対数カーネルの 2 次式当てはめの傾き gamma_q と曲率 beta2。参考: 直線の gamma_I とその変種、方法 II）
+  実確率側の材料（RV20, RV60, 20 日リターン, IV−RV）
 
 を 1 レコードにして R2 の qri_iv/derived/gamma_daily.jsonl に追記する（同じ日は置き換え）。
 使い方: python scripts/gamma_daily.py [--day YYYYMMDD] [--since YYYYMMDD] [--no-upload]
@@ -86,10 +86,16 @@ def compute(day: str, phys: Physical) -> dict | None:
                gamma_II=gamma_moment(K, fK, F, xP), tilt={})
     mq, sq_, skq, kuq = q_moments(K, fK, F); mp_, sp_, skp, kup = p_moments(xP)
     rec.update(skew_q=skq, kurt_q=kuq, skew_p=skp, kurt_p=kup, s_q=sq_, s_p=sp_)
+    rec = {**{k: rec[k] for k in ("day", "cm", "ts", "key", "F", "T")}, **primary_fields(rec), **rec}  # 主指標を先頭に
     for gm in (0.0, 2.0, 4.0, 6.0):
         stp = stats(K, tilt(K, fK, gm)) if gm else st
         rec["tilt"][str(gm)] = dict(mean=stp["mean"], median=stp["q"][0.5], mode=stp["mode"], q05=stp["q"][0.05], q95=stp["q"][0.95], p_lt65=stp["cdf"](65000), p_ge70=1 - stp["cdf"](70000))
     return rec
+
+
+def primary_fields(rec: dict) -> dict:
+    """主指標（ユーザー指示 2026-10-21）: gamma_q = 2 次式の 1 次項の符号反転（ATM 近傍の局所 γ）、beta2 = 2 次項（曲率、IV−RV のプレミアム）、ivrv = ATM IV − RV20。"""
+    return dict(gamma_q=rec["gamma_I_quad"], beta2=rec["quad"], ivrv=rec["atm"] - rec["rv20"])
 
 
 def load_store(upload: bool) -> list[dict]:
@@ -111,6 +117,10 @@ def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--day"); ap.add_argument("--since"); ap.add_argument("--no-upload", action="store_true"); ap.add_argument("--force", action="store_true")
     a = ap.parse_args(); upload = not a.no_upload
     phys = Physical(nikkei_close()); store = load_store(upload); have = {r["day"] for r in store}
+    n_mig = 0
+    for i, r in enumerate(store):  # 旧レコードに主指標列を補う
+        if "gamma_q" not in r or "beta2" not in r or "ivrv" not in r:
+            store[i] = {**{k: r[k] for k in ("day", "cm", "ts", "key", "F", "T")}, **primary_fields(r), **r}; n_mig += 1
     if a.since:
         days = [d for d in sorted(iv_views.list_available_days(400)) if d >= a.since and pd.Timestamp(d).weekday() < 5]
     elif a.day:
@@ -131,12 +141,12 @@ def main():
         if rec is None:
             continue
         store = [r for r in store if r["day"] != d] + [rec]; n_new += 1
-        log.info("%s %s F=%.0f atm=%.1f%% gamma_I=%.2f gamma_II=%.2f rv20=%.1f%%", d, rec["cm"], rec["F"], rec["atm"] * 100, rec["gamma_I"], rec["gamma_II"], rec["rv20"] * 100)
+        log.info("%s %s F=%.0f atm=%.1f%% gamma_q=%.2f beta2=%.1f ivrv=%.1f%% (gamma_I=%.2f gamma_II=%.2f)", d, rec["cm"], rec["F"], rec["atm"] * 100, rec["gamma_q"], rec["beta2"], rec["ivrv"] * 100, rec["gamma_I"], rec["gamma_II"])
         if n_new % 10 == 0:
             save_store(store, upload)
-    if n_new:
+    if n_new or n_mig:
         save_store(store, upload)
-    log.info("done: %d new, %d total", n_new, len({r['day'] for r in store}))
+    log.info("done: %d new, %d migrated, %d total", n_new, n_mig, len({r['day'] for r in store}))
 
 
 if __name__ == "__main__":

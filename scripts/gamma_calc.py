@@ -98,10 +98,12 @@ for d in days:
         mq, sq_, skq, kuq = q_moments(K, fK, F); mp, sp_, skp, kup = p_moments(xP)
         g2 = (skp - skq) / (sp_ * (kup - 3)) if kup > 3.2 else np.nan
         atm = float(np.sqrt(rnd_lib.svi(p, np.array([0.0]))[0][0] / T))
-        rows.append(dict(day=d, cm=cm, ts=str(ts), F=F, T=T, n_days=n_days, atm=atm, rv20=rv_now, rv60=rv60_now, rmse=rmse, p=p.tolist(), gamma_I=res["gamma"], gamma_I_quad=res["gamma_quadfit"], quad=res["quad"], r2=res["r2"],
+        rows.append(dict(day=d, cm=cm, ts=str(ts), F=F, T=T, n_days=n_days, atm=atm, rv20=rv_now, rv60=rv60_now, rmse=rmse, p=p.tolist(),
+                         gamma_q=res["gamma_quadfit"], beta2=res["quad"], ivrv=atm - rv_now,  # 主指標
+                         gamma_I=res["gamma"], gamma_I_quad=res["gamma_quadfit"], quad=res["quad"], r2=res["r2"],
                          gamma_rv60=var["rv60"], gamma_c80=var["c80"], gamma_bw=var["bw_narrow"], gamma_II=float(g2), skew_q=float(skq), kurt_q=float(kuq), skew_p=float(skp), kurt_p=float(kup), s_q=float(sq_), s_p=float(sp_),
                          ret20=float(lp[lp.index <= dt].iloc[-1] - lp[lp.index <= dt].iloc[-21]) if (lp.index <= dt).sum() > 21 else np.nan))
-        latest = dict(day=d, K=K, fQ=res["fQ"], fP=res["fP"], x=res["xgrid"], lnM=res["lnM"], xsel=res["x"], a=res["a"], gamma=res["gamma"], F=F, T=T, fK=fK, xP=xP)
+        latest = dict(day=d, K=K, fQ=res["fQ"], fP=res["fP"], x=res["xgrid"], lnM=res["lnM"], xsel=res["x"], a=res["a"], gamma=res["gamma"], gamma_q=res["gamma_quadfit"], beta2=res["quad"], F=F, T=T, fK=fK, xP=xP)
         print(d, cm, round(F), f"T={T*365:.0f}d atm={atm*100:.1f} rv20={rv_now*100:.1f} gI={res['gamma']:.2f} (rv60 {var['rv60']:.2f}, c80 {var['c80']:.2f}) gII={g2:.2f} r2={res['r2']:.2f} quad={res['quad']:.1f}", flush=True)
     except Exception as e:
         print(d, "error", e)
@@ -110,23 +112,33 @@ ser = pd.DataFrame(rows); ser.to_json(OUT / "gamma_series.json", orient="records
 ser["date"] = pd.to_datetime(ser.day); ser = ser.set_index("date")
 for hh in (5, 10, 20):
     ser[f"fwd{hh}"] = fwd[hh].reindex(ser.index, method="ffill").values
-rel = dict(n=int(len(ser)), mean=float(ser.gamma_I.mean()), sd=float(ser.gamma_I.std()), median=float(ser.gamma_I.median()), q10=float(ser.gamma_I.quantile(0.1)), q90=float(ser.gamma_I.quantile(0.9)),
-           mean_II=float(ser.gamma_II.mean()), corr=dict(lnF=float(np.corrcoef(ser.gamma_I, np.log(ser.F))[0, 1]), ret20=float(ser[["gamma_I", "ret20"]].corr().iloc[0, 1]), rv20=float(np.corrcoef(ser.gamma_I, ser.rv20)[0, 1]),
-                                                         atm=float(np.corrcoef(ser.gamma_I, ser.atm)[0, 1]), ivrv=float(np.corrcoef(ser.gamma_I, ser.atm / ser.rv20)[0, 1]), gII=float(ser[["gamma_I", "gamma_II"]].corr().iloc[0, 1])),
-           fwd_corr={str(hh): float(ser[["gamma_I", f"fwd{hh}"]].dropna().corr().iloc[0, 1]) for hh in (5, 10, 20)},
+def summ(col):
+    """系列の要約と、原資産・ボラ・先行リターンとの相関。"""
+    s = ser[col]
+    return dict(mean=float(s.mean()), sd=float(s.std()), median=float(s.median()), q10=float(s.quantile(0.1)), q90=float(s.quantile(0.9)), autocorr1=float(s.autocorr(1)),
+                corr=dict(lnF=float(np.corrcoef(s, np.log(ser.F))[0, 1]), ret20=float(ser[[col, "ret20"]].corr().iloc[0, 1]), rv20=float(np.corrcoef(s, ser.rv20)[0, 1]),
+                          atm=float(np.corrcoef(s, ser.atm)[0, 1]), ivrv=float(np.corrcoef(s, ser.ivrv)[0, 1]), gII=float(ser[[col, "gamma_II"]].corr().iloc[0, 1])),
+                fwd_corr={str(hh): float(ser[[col, f"fwd{hh}"]].dropna().corr().iloc[0, 1]) for hh in (5, 10, 20)})
+
+
+# 主指標 = gamma_q（2 次式の傾き）と beta2（曲率）。直線の gamma_I は参考（rel["lin"]）。
+rel = dict(n=int(len(ser)), primary="gamma_q", **summ("gamma_q"), b2=summ("beta2"), lin=summ("gamma_I"), mean_II=float(ser.gamma_II.mean()),
            fwd_n={str(hh): int(ser[f"fwd{hh}"].notna().sum()) for hh in (5, 10, 20)},
            variant_spread=float((ser[["gamma_I", "gamma_rv60", "gamma_c80", "gamma_bw"]].max(axis=1) - ser[["gamma_I", "gamma_rv60", "gamma_c80", "gamma_bw"]].min(axis=1)).mean()),
-           autocorr1=float(ser.gamma_I.autocorr(1)))
-X = np.vstack([np.ones(len(ser)), ser.ret20.fillna(0).values, ser.rv20.values]).T; b, *_ = np.linalg.lstsq(X, ser.gamma_I.values, rcond=None)
+           corr_q_lin=float(ser[["gamma_q", "gamma_I"]].corr().iloc[0, 1]))
+X = np.vstack([np.ones(len(ser)), ser.ret20.fillna(0).values, ser.rv20.values]).T; b, *_ = np.linalg.lstsq(X, ser.gamma_q.values, rcond=None)
 rel["reg"] = dict(const=float(b[0]), ret20=float(b[1]), rv20=float(b[2]))
+Xb = np.vstack([np.ones(len(ser)), ser.ivrv.values * 100]).T; bb, *_ = np.linalg.lstsq(Xb, ser.beta2.values, rcond=None)
+rel["reg_b2"] = dict(const=float(bb[0]), ivrv=float(bb[1]))
 # ---------------------------------------------------------------- ブートストラップ（最終日）
 rng = np.random.default_rng(0); nb = 200; L = latest; n_days = int(round(L["T"] * 250)); xP = L["xP"]; blk = max(n_days, 5)
-bs = []
+bs = {"gamma_q": [], "beta2": [], "gamma_I": []}
 nblocks = len(xP) // blk
 for _ in range(nb):
     idx = rng.integers(0, len(xP) - blk, size=nblocks); samp = np.concatenate([xP[i:i + blk] for i in idx])
-    bs.append(gamma_kernel(L["K"], L["fK"], L["F"], samp)["gamma"])
-boot = dict(mean=float(np.mean(bs)), sd=float(np.std(bs)), lo=float(np.percentile(bs, 2.5)), hi=float(np.percentile(bs, 97.5)), n=nb, block=blk)
+    rb = gamma_kernel(L["K"], L["fK"], L["F"], samp); bs["gamma_q"].append(rb["gamma_quadfit"]); bs["beta2"].append(rb["quad"]); bs["gamma_I"].append(rb["gamma"])
+_bsum = lambda v: dict(mean=float(np.mean(v)), sd=float(np.std(v)), lo=float(np.percentile(v, 2.5)), hi=float(np.percentile(v, 97.5)))
+boot = dict(**_bsum(bs["gamma_q"]), b2=_bsum(bs["beta2"]), lin=_bsum(bs["gamma_I"]), n=nb, block=blk)
 # ---------------------------------------------------------------- 方法 III: 最尤法（実現 SQ）
 grid = np.arange(0, 12.01, 0.25); mle = {"expiries": [], "profile_28d": None, "profile_all": None}
 ll28 = np.zeros_like(grid); llall = np.zeros_like(grid); n_all = 0
@@ -151,6 +163,6 @@ for cm, sq in SQ_REALIZED.items():
 i28 = int(np.argmax(ll28)); ci = grid[ll28 >= ll28[i28] - 1.92]
 mle["profile_28d"] = dict(grid=grid.tolist(), ll=ll28.tolist(), gamma_hat=float(grid[i28]), ci_lo=float(ci.min()), ci_hi=float(ci.max()), n=len(mle["expiries"]))
 ia = int(np.argmax(llall)); mle["profile_all"] = dict(grid=grid.tolist(), ll=llall.tolist(), gamma_hat=float(grid[ia]), n=n_all)
-json.dump(dict(series_summary=rel, boot=boot, mle=mle, latest=dict(day=L["day"], gamma=L["gamma"], a=L["a"], F=L["F"], T=L["T"]), sq_realized=SQ_REALIZED), open(OUT / "gamma_calc.json", "w"), default=float)
+json.dump(dict(series_summary=rel, boot=boot, mle=mle, latest=dict(day=L["day"], gamma=L["gamma"], gamma_q=L["gamma_q"], beta2=L["beta2"], a=L["a"], F=L["F"], T=L["T"]), sq_realized=SQ_REALIZED), open(OUT / "gamma_calc.json", "w"), default=float)
 np.savez(OUT / "gamma_latest.npz", K=L["K"], fQ=L["fQ"], fP=L["fP"], x=L["x"], lnM=L["lnM"], xsel=L["xsel"], fK=L["fK"])
 print("summary", json.dumps(rel, default=float)); print("boot", boot); print("mle28", mle["profile_28d"]["gamma_hat"], mle["profile_28d"]["ci_lo"], mle["profile_28d"]["ci_hi"], "mle_all", mle["profile_all"]["gamma_hat"])
