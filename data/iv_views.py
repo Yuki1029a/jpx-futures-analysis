@@ -15,19 +15,25 @@ from datetime import date, datetime
 import pandas as pd
 
 from data import r2_storage
-from data.qri_iv_loader import _R2_PREFIX, _LOCAL_ROOT, list_snapshot_keys, load_snapshot
+from data.qri_iv_loader import _LOCAL_ROOT, _LOCAL_ROOT_MINI, _R2_PREFIX, _R2_PREFIX_MINI, list_snapshot_keys, load_snapshot
 
 logger = logging.getLogger(__name__)
 
 
-def list_available_days(limit: int = 60) -> list[str]:
+def _roots(mini: bool):
+    """(R2 prefix, local root)。mini=True で日経225ミニオプション（週次満期）のスナップショット。"""
+    return (_R2_PREFIX_MINI, _LOCAL_ROOT_MINI) if mini else (_R2_PREFIX, _LOCAL_ROOT)
+
+
+def list_available_days(limit: int = 60, mini: bool = False) -> list[str]:
     """Days (YYYYMMDD) that have at least one snapshot. Ascending. R2 + local union."""
     days: set[str] = set()
+    r2_prefix, local_root = _roots(mini)
     r2_storage._init_client()
     if r2_storage._client is not None:
         try:
             resp = r2_storage._client.list_objects_v2(
-                Bucket=r2_storage._bucket, Prefix=f"{_R2_PREFIX}/", Delimiter="/"
+                Bucket=r2_storage._bucket, Prefix=f"{r2_prefix}/", Delimiter="/"
             )
             for p in resp.get("CommonPrefixes", []):
                 d = p["Prefix"].rstrip("/").split("/")[-1]
@@ -35,29 +41,30 @@ def list_available_days(limit: int = 60) -> list[str]:
                     days.add(d)
         except Exception as e:
             logger.warning("list_available_days R2 failed: %s", e)
-    if _LOCAL_ROOT.exists():
-        for p in _LOCAL_ROOT.iterdir():
+    if local_root.exists():
+        for p in local_root.iterdir():
             if p.is_dir() and len(p.name) == 8 and p.name.isdigit():
                 days.add(p.name)
     return sorted(days)[-limit:]
 
 
-_KEYS_DONE: dict[str, list[str]] = {}  # 2日以上前の日は追加されないので一覧を常駐キャッシュ
+_KEYS_DONE: dict[tuple[str, bool], list[str]] = {}  # 2日以上前の日は追加されないので一覧を常駐キャッシュ
 
 
-def snapshot_keys(day_str: str) -> list[str]:
-    """Snapshot keys of a day, ascending (oldest first)."""
-    if day_str in _KEYS_DONE:
-        return _KEYS_DONE[day_str]
+def snapshot_keys(day_str: str, mini: bool = False) -> list[str]:
+    """Snapshot keys of a day, ascending (oldest first). mini=True でミニ（週次満期）。"""
+    if (day_str, mini) in _KEYS_DONE:
+        return _KEYS_DONE[(day_str, mini)]
+    r2_prefix, local_root = _roots(mini)
     d = datetime.strptime(day_str, "%Y%m%d").date()
-    keys = list_snapshot_keys(d)
+    keys = list_snapshot_keys(d, r2_prefix)
     if keys:
         if (date.today() - d).days >= 2:
-            _KEYS_DONE[day_str] = keys
+            _KEYS_DONE[(day_str, mini)] = keys
         return keys
-    local_dir = _LOCAL_ROOT / day_str
+    local_dir = local_root / day_str
     if local_dir.exists():
-        return [f"{_R2_PREFIX}/{day_str}/{p.name}" for p in sorted(local_dir.glob("*.parquet"))]
+        return [f"{r2_prefix}/{day_str}/{p.name}" for p in sorted(local_dir.glob("*.parquet"))]
     return []
 
 
@@ -138,7 +145,7 @@ def month_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def strike_daily_oi_jpx(days: list[str], cm: str, option_type: str,
-                        strikes: list[int]) -> pd.DataFrame:
+                        strikes: list[int], mini: bool = False) -> pd.DataFrame:
     """JPX建玉残高表ベースの行使価格別・日次建玉残（取引日のみ）。
 
     QRIのoi列は2026-07-12以前の収集分に「4桁以上は先頭3桁のみ」の破損が
@@ -149,7 +156,7 @@ def strike_daily_oi_jpx(days: list[str], cm: str, option_type: str,
     rows = []
     for d in days:
         dt = date(int(d[:4]), int(d[4:6]), int(d[6:8]))
-        jpx = _jpx_daily_oi_frame(dt, cm)
+        jpx = _jpx_daily_oi_frame(dt, cm, mini)
         if jpx is None or not len(jpx):
             continue
         g = jpx[(jpx.option_type == option_type) & jpx.strike.isin(strikes)]
@@ -159,14 +166,14 @@ def strike_daily_oi_jpx(days: list[str], cm: str, option_type: str,
 
 
 def strike_daily_series(days: list[str], cm: str, option_type: str,
-                        strikes: list[int] | None = None) -> pd.DataFrame:
+                        strikes: list[int] | None = None, mini: bool = False) -> pd.DataFrame:
     """Per-strike daily series (16:59以前・有効IVありの最終スナップショット).
 
     Returns: day(date), strike, iv_pct(eff_iv), oi, volume.
     """
     rows = []
     for d in days:
-        kd = _day_iv_snapshot(d, cm)
+        kd = _day_iv_snapshot(d, cm, mini=mini)
         if kd is None or kd[1].empty:
             continue
         m = with_eff_iv(kd[1])
@@ -221,6 +228,11 @@ def strike_intraday_series(days: list[str], n_days: int, cm: str, option_type: s
 
 _REDUCED: dict[tuple[str, str], pd.DataFrame | None] = {}
 _MIN_TWO_SIDED = 100  # 日中・夜間の通常時は 250-400 銘柄が両気配
+_MIN_TWO_SIDED_MINI = 40  # ミニは満期ごとに 60-150 銘柄が両気配（遠い満期は少ない）
+
+
+def _min_two_sided(mini: bool) -> int:
+    return _MIN_TWO_SIDED_MINI if mini else _MIN_TWO_SIDED
 
 
 def _month_reduced(key: str, cm: str) -> pd.DataFrame | None:
@@ -245,7 +257,7 @@ def _month_reduced(key: str, cm: str) -> pd.DataFrame | None:
 
 
 def strike_intraday_ohlc(days: list[str], n_days: int, cm: str, option_type: str,
-                         strikes: list[int], freq: str = "1h") -> pd.DataFrame:
+                         strikes: list[int], freq: str = "1h", mini: bool = False) -> pd.DataFrame:
     """直近n取引日の行使別IVを時間足OHLCに圧縮する（日内チャート用）。
 
     各スナップショット t で
@@ -262,14 +274,14 @@ def strike_intraday_ohlc(days: list[str], n_days: int, cm: str, option_type: str
     anchor = days[-1]
     # 1日多く読み、表示初日の最初の e にも直前（前日引け）のスナップショットを使う
     tdays = [d for d in days if d == anchor or _is_trading_day(d)][-(n_days + 1):]
-    keys = [(d, k) for d in tdays for k in snapshot_keys(d)]
+    keys = [(d, k) for d in tdays for k in snapshot_keys(d, mini)]
     prefetch_snapshots([k for _, k in keys])
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(8) as ex:
         reduced = list(ex.map(lambda dk: _month_reduced(dk[1], cm), keys))
     # 板が薄いスナップショット（引け後・夜間寄り前後。両気配が数十銘柄以下）は
     # IVが清算値ベースに置き換わり水準が不連続になるため除外する
-    reduced = [g if g is not None and int(g.q.sum()) >= _MIN_TWO_SIDED else None for g in reduced]
+    reduced = [g if g is not None and int(g.q.sum()) >= _min_two_sided(mini) else None for g in reduced]
     # 地合い L(t) = 同限月・全行使（PUT/CALL）の固定行使 ΔIV(t, t−1) の中央値。
     # 母集団は t と t−1 の両方で両気配の銘柄（5未満なら L は欠損）。表の超過ΔIVと同じ定義。
     lvl: dict[str, float] = {}
@@ -336,8 +348,25 @@ def _iv_slice(df: pd.DataFrame, cm: str) -> pd.DataFrame:
     return g.set_index(["option_type", "strike"])
 
 
-def _jpx_daily_oi_frame(trade_day: date, cm: str) -> pd.DataFrame | None:
-    """JPX建玉残高表（当日20:00頃公表・系列別）の1限月分。未公表・休日はNone。"""
+def _jpx_daily_oi_frame(trade_day: date, cm: str, mini: bool = False) -> pd.DataFrame | None:
+    """JPX建玉残高表（当日20:00頃公表・系列別）の1限月分。未公表・休日はNone。
+
+    mini=True は別紙2（日経225ミニオプション、週次満期。cm は満期コード 'YYMMDD'）。
+    """
+    if mini:
+        from data.weekly_options import strike_frame
+        try:
+            f = strike_frame(trade_day, cm)
+        except Exception as e:
+            logger.warning("JPX mini OI load failed for %s: %s", trade_day, e)
+            return None
+        if f is None or f.empty:
+            return None
+        rows = []
+        for r in f.itertuples():
+            rows.append({"option_type": "PUT", "strike": int(r.strike), "oi": float(r.put_oi), "d_oi": float(r.put_chg), "volume": float(r.put_vol)})
+            rows.append({"option_type": "CALL", "strike": int(r.strike), "oi": float(r.call_oi), "d_oi": float(r.call_chg), "volume": float(r.call_vol)})
+        return pd.DataFrame(rows)
     from data.aggregator import _load_daily_oi_for_date
     try:
         recs = _load_daily_oi_for_date(trade_day, cm)
@@ -354,14 +383,14 @@ def _jpx_daily_oi_frame(trade_day: date, cm: str) -> pd.DataFrame | None:
 
 
 def _day_iv_snapshot(day_str: str, cm: str, min_rows: int = 5,
-                     max_walk: int = 6) -> tuple[str, pd.DataFrame] | None:
+                     max_walk: int = 6, mini: bool = False) -> tuple[str, pd.DataFrame] | None:
     """16:59以前で「当該限月のIVが実際に入っている」最後の (key, df)。
 
     引け後スナップショットは板クリアでIVが全欠損の日がある（例: 7/7 16:53）。
     その場合は最大 max_walk 本さかのぼり、有効IVが min_rows 以上ある
     スナップショットを使う。全滅なら16:59以前の最終（空でも）を返す。
     """
-    keys = snapshot_keys(day_str)
+    keys = snapshot_keys(day_str, mini)
     if not keys:
         return None
     pre = [k for k in keys
@@ -428,7 +457,7 @@ def _level_judge(out: pd.DataFrame, lvl_q: list, lvl_all: list,
     return out, meta
 
 
-def _vw_excess(keys: list[str], cm: str) -> dict[tuple[str, int], float]:
+def _vw_excess(keys: list[str], cm: str, mini: bool = False) -> dict[tuple[str, int], float]:
     """出来高加重の超過ΔIV（窓内のスナップショット列 keys、昇順）。
 
       e_k(t)  = ΔIV_k(t, t−1) − L(t)            [%pt]（L は strike_intraday_ohlc と同じ中央値）
@@ -445,7 +474,7 @@ def _vw_excess(keys: list[str], cm: str) -> dict[tuple[str, int], float]:
     den: dict = {}
     prev = None
     for g in red:
-        if g is None or int(g.q.sum()) < _MIN_TWO_SIDED:
+        if g is None or int(g.q.sum()) < _min_two_sided(mini):
             continue
         cur = g.set_index(["option_type", "strike"])
         cur = cur[~cur.index.duplicated()]
@@ -465,7 +494,7 @@ def _vw_excess(keys: list[str], cm: str) -> dict[tuple[str, int], float]:
     return {(ot, int(k)): num[(ot, k)] / den[(ot, k)] for (ot, k) in num if den[(ot, k)] > 0}
 
 
-def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
+def flow_judgement(days: list[str], cm: str, mini: bool = False) -> tuple[pd.DataFrame, dict]:
     """Δ建玉×ΔIV quadrant per (strike, type)。
 
     第1候補（source="jpx"）: JPX建玉残高表（当日20:00頃公表・系列別）。
@@ -488,23 +517,23 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
 
     # ---- 1) JPX建玉残高表（当日分・系列別） ----
     for i, d in enumerate(desc[:6]):
-        jpx = _jpx_daily_oi_frame(date(int(d[:4]), int(d[4:6]), int(d[6:8])), cm)
+        jpx = _jpx_daily_oi_frame(date(int(d[:4]), int(d[4:6]), int(d[6:8])), cm, mini)
         if jpx is None or not len(jpx):
             continue
-        cur_kd = _day_iv_snapshot(d, cm)
+        cur_kd = _day_iv_snapshot(d, cm, mini=mini)
         prv_day = next((x for x in desc[i + 1:i + 7]
-                        if snapshot_keys(x) and _is_trading_day(x)), None)
+                        if snapshot_keys(x, mini) and _is_trading_day(x)), None)
         if cur_kd is None or prv_day is None:
             continue
-        prv_kd = _day_iv_snapshot(prv_day, cm)
+        prv_kd = _day_iv_snapshot(prv_day, cm, mini=mini)
         if prv_kd is None:
             continue
         cur_df, prv_df = cur_kd[1], prv_kd[1]
         if cur_df.empty or prv_df.empty:
             continue
         ci, pi = _iv_slice(cur_df, cm), _iv_slice(prv_df, cm)
-        win = [k for k in snapshot_keys(prv_day) + snapshot_keys(d) if prv_kd[0] <= k <= cur_kd[0]]
-        vw = _vw_excess(win, cm)
+        win = [k for k in snapshot_keys(prv_day, mini) + snapshot_keys(d, mini) if prv_kd[0] <= k <= cur_kd[0]]
+        vw = _vw_excess(win, cm, mini)
         rows, lvl_q, lvl_all = [], [], []
         for _, r in jpx.iterrows():
             key = (r.option_type, int(r.strike))
@@ -530,7 +559,7 @@ def flow_judgement(days: list[str], cm: str) -> tuple[pd.DataFrame, dict]:
     # ---- 2) フォールバック: QRIのOI欄（翌取引日朝反映）ペア方式 ----
     snaps: list[tuple[str, pd.DataFrame]] = []
     for d in desc:
-        kd = _day_iv_snapshot(d, cm)
+        kd = _day_iv_snapshot(d, cm, mini=mini)
         if kd is None or kd[1].empty:
             continue
         snaps.append((d, kd[1]))

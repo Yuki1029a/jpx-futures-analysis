@@ -13,7 +13,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from data import iv_views
 from data import weekly_options as wo
+from ui.iv_monitor_section import render_strike_section
 
 st.set_page_config(page_title="週次オプション", layout="wide")
 _TTL = 300
@@ -53,6 +55,23 @@ def _iv_snapshot(key: str):
     return df if df is not None else pd.DataFrame()
 
 
+@st.cache_data(ttl=_TTL, show_spinner=False)
+def _mini_days():
+    return iv_views.list_available_days(mini=True)
+
+
+def _pick_close(keys: list[str]):
+    """日中引けのスナップショット = 気配時刻（source_update_time）が 08:45〜15:30:59 の最終。15:30 以降はマーケットメイカーが気配を引くため使わない。"""
+    for k in reversed(keys):
+        df = _iv_snapshot(k)
+        if df.empty or "source_update_time" not in df.columns:
+            continue
+        s_ = df.source_update_time.dropna().astype(str); t = s_.iloc[0][11:19] if len(s_) else ""
+        if "08:45:00" <= t <= "15:30:59":
+            return k, df
+    return None, None
+
+
 def main():
     st.sidebar.title("週次オプション")
     if st.sidebar.button("最新データに更新", use_container_width=True):
@@ -71,11 +90,12 @@ def main():
     default = max(live, key=lambda e: float(_frame(d, e)[["put_oi", "call_oi"]].sum().sum()))  # 建玉が最大の未満期
     exp = st.sidebar.selectbox("満期", exps, index=exps.index(default), format_func=lambda e: labels[e])
     n_hist = st.sidebar.slider("推移の日数", 5, 30, 15)
+    intra_n = st.sidebar.slider("日内チャートの日数", 1, 5, 2)
     info = wo.expiry_info(exp)
 
     st.title("週次オプション（日経225ミニオプション）建玉モニター")
     st.caption(f"建玉残高表 別紙2（{d:%Y/%m/%d} 引け、20:00 公表）。満期コード {exp} = 最終取引日 {info['last_trading']:%m/%d}、SQ 算出 {info['sq']:%m/%d}。"
-               "取引単位は指数 × 100。手口（参加者別）と IV は現時点で未収集。")
+               "取引単位は指数 × 100。IV は QRI（15 分遅延）を 2026-10-20 から収集。手口（参加者別）は JPX 未公表。")
     f = _frame(d, exp)
     if f.empty:
         st.info("この満期の建玉がありません"); st.stop()
@@ -125,13 +145,23 @@ def main():
     else:
         st.info("推移を描くには 2 日以上の建玉データが必要です")
 
-    # ---- IV（QRI ミニオプション、収集開始後に表示）
+    # ---- IV（QRI ミニオプション、15 分遅延）
     st.subheader("IV（QRI 日経225ミニオプション、15 分遅延）")
-    ivk = _iv_keys(d) or _iv_keys(d + timedelta(days=1))  # 夜間立会分は翌暦日のフォルダに入る
-    if ivk:
-        ivdf = _iv_snapshot(ivk[-1]); sub = ivdf[ivdf.contract_month == exp].copy() if "contract_month" in ivdf.columns else ivdf.iloc[0:0]
+    dstr = d.strftime("%Y%m%d")
+    days_sel = [x for x in _mini_days() if x <= dstr]  # 判定・チャートの窓（表示日をアンカーに過去方向）
+    ivk = _iv_keys(d); ivk_next = _iv_keys(d + timedelta(days=1))  # 夜間立会分は翌暦日のフォルダに入る
+    if not (ivk or ivk_next):
+        st.caption("この日の IV スナップショットは未収集です（ミニオプションの QRI 収集は 2026-10-20 開始）。")
+    else:
+        when = st.radio("表示時点", ["日中引け（気配 15:30 まで）", "最新（夜間を含む）"], horizontal=True, key="wk_when")
+        key_sel, ivdf = _pick_close(ivk) if when.startswith("日中") else (None, None)
+        if key_sel is None:
+            key_sel = (ivk + ivk_next)[-1]; ivdf = _iv_snapshot(key_sel)
+            if when.startswith("日中"):
+                st.caption("日中引け（気配 08:45〜15:30）のスナップショットが無いため最新を表示")
+        sub = ivdf[ivdf.contract_month == exp].copy() if "contract_month" in ivdf.columns else ivdf.iloc[0:0]
         if sub.empty:
-            st.caption(f"最終スナップショット {ivk[-1].split('/')[-1][9:15]} にこの満期（{exp}）の行がありません")
+            st.caption(f"スナップショット {key_sel.split('/')[-1][9:15]} にこの満期（{exp}）の行がありません")
         else:
             from data.iv_views import with_eff_iv
             sub = with_eff_iv(sub); sub["delta"] = pd.to_numeric(sub.delta, errors="coerce")
@@ -141,7 +171,8 @@ def main():
                 tbl[f"{lab} IV%"] = (pv[("eff_iv", ot)].values * 100).round(1) if ("eff_iv", ot) in pv.columns else None
                 tbl[f"{lab} Δ"] = pv[("delta", ot)].values.round(2) if ("delta", ot) in pv.columns else None
             tbl = tbl[(tbl["PUT IV%"].notna()) | (tbl["CALL IV%"].notna())]
-            fn = ivk[-1].split("/")[-1]; st.caption(f"スナップショット {fn[4:6]}/{fn[6:8]} {fn[9:11]}:{fn[11:13]}（取得時刻、配信は 15 分遅延）。両気配の仲値 IV、無ければ約定・清算ベース。")
+            fn = key_sel.split("/")[-1]; src = ivdf.source_update_time.dropna().astype(str)
+            st.caption(f"スナップショット {fn[4:6]}/{fn[6:8]} {fn[9:11]}:{fn[11:13]} 取得（気配時刻 {src.iloc[0][11:16] if len(src) else '-'}、配信は 15 分遅延）。両気配の仲値 IV、無ければ約定・清算ベース。")
             figiv = go.Figure()
             for ot, col in (("PUT", _COL["put"]), ("CALL", _COL["call"])):
                 s_ = sub[(sub.option_type == ot) & sub.eff_iv.notna()].sort_values("strike")
@@ -149,8 +180,11 @@ def main():
             figiv.update_layout(height=300, template="plotly_white", title=f"{labels[exp]}：IV スマイル", yaxis=dict(title="IV (%)"), xaxis=dict(title="行使価格（円）"), legend=dict(orientation="h", y=-0.3), margin=dict(l=0, r=0, t=40, b=0))
             st.plotly_chart(figiv, use_container_width=True)
             st.dataframe(tbl, hide_index=True, use_container_width=True, height=min(500, 40 + 35 * len(tbl)))
-    else:
-        st.caption("この日の IV スナップショットは未収集です（ミニオプションの QRI 収集は 2026-10-20 開始）。")
+        # ---- IV モニターの流用（Δ建玉×超過ΔIV 判定・日次チャート・日内ローソク足／累積超過ΔIV）
+        if days_sel:
+            st.subheader("行使価格別 IV×建玉（買われたか・売られたか）")
+            st.caption("日経225オプションの IV モニターと同じ判定・チャート。Δ建玉は別紙2、IV はミニオプションの QRI スナップショット。")
+            render_strike_section(days_sel, exp, ivdf, n_hist, intra_n, mini=True, fmt_cm=lambda c: labels.get(c, c), key_prefix="wk")
 
     # ---- 満期一覧
     st.subheader(f"{d:%m/%d} 時点の満期一覧")
