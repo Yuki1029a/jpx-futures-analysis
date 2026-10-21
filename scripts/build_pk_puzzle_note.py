@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent)); sys.path.insert(0, str
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.platypus import CondPageBreak, PageBreak, SimpleDocTemplate
@@ -40,11 +39,17 @@ gk = gamma_kernel(K, fK, F, xP); beta2_gauss = 0.5 * (1 / sP ** 2 - 1 / sQ ** 2)
 shift_tbl = []
 for s_ in (-0.01, -0.005, 0.0, 0.005, 0.01):
     g2 = gamma_kernel(K, fK, F, xP - xP.mean() + muQ + s_); shift_tbl.append((s_, g2["gamma"], g2["gamma_quadfit"], g2["quad"]))
-# 状態回帰
-X = pd.DataFrame({"atm": df.atm * 100, "rv20": df.rv20 * 100, "ret20": df.ret20 * 100, "T_days": df["T"] * 365}); X["ivrv"] = X.atm - X.rv20
-Xc = sm.add_constant(X[["atm", "rv20", "ret20", "T_days"]])
-reg = {lab: sm.OLS(df[col], Xc).fit(cov_type="HAC", cov_kwds={"maxlags": 5}) for lab, col in [("gamma_I", "gamma_I"), ("quad", "quad")]}
-corr = pd.concat([df.gamma_I, df.quad.rename("curv"), X], axis=1).corr()
+# 機械的成分の実験: 選好を変えずに f_P の幅（RV）・f_Q の幅（IV）だけを動かす
+def _chan(sc_p, sc_q, fix_mean=False):
+    p2 = np.array(r["p"]).copy(); p2[0] *= sc_q ** 2; p2[1] *= sc_q ** 2; K2, fK2, _, _ = density(p2, F, T, XS)
+    x2 = phys.sample(r["n_days"], r["rv20"] * sc_p)
+    if fix_mean:
+        x2 = x2 - x2.mean() + xP.mean()
+    g2 = gamma_kernel(K2, fK2, F, x2); mq2, sq2, _, _ = q_moments(K2, fK2, F)
+    return dict(s_p=float(x2.std()), mu_p=float(x2.mean()), s_q=float(sq2), gamma=g2["gamma"], gamma_q=g2["gamma_quadfit"], beta2=g2["quad"])
+chan = {"A": [(sc, _chan(sc, 1.0)) for sc in (0.6, 0.8, 1.0, 1.2, 1.4)], "A2": [(sc, _chan(sc, 1.0, True)) for sc in (0.6, 0.8, 1.0, 1.2, 1.4)],
+        "B": [(sc, _chan(1.0, sc)) for sc in (0.8, 0.9, 1.0, 1.1, 1.2)], "C": [(sc, _chan(sc, sc)) for sc in (0.7, 0.85, 1.0, 1.15, 1.3)]}
+corr_ivrv = float(np.corrcoef(df.quad, df.atm - df.rv20)[0, 1])
 # 重み付け実験の読み取り
 wrows = [(m.group(1).strip(), float(m.group(2)), float(m.group(3)), float(m.group(4))) for m in re.finditer(r"^(.+?)\s+γ̂\(直線\)=([+-][\d.]+)\s+γ̂\(2次の1次項\)=([+-][\d.]+)\s+曲率=([+-][\d.]+)", GW, re.M)]
 atm_line = re.search(r"ATM IV: 現行 ([\d.]+)% 出来高重み ([\d.]+)% 建玉重み ([\d.]+)%", GW).groups()
@@ -83,15 +88,13 @@ def fig_schematic():
     ax[1].text(0.19, -0.3, "右側で負（パズル）", ha="right", fontsize=8, color=A); fig.tight_layout(); return fig_to_img(fig)
 
 
-def fig_state():
-    fig, ax = plt.subplots(1, 3, figsize=(7.2, 2.7))
-    ax[0].scatter(X.ivrv, df.quad, s=14, color=B, alpha=0.75); b = np.polyfit(X.ivrv, df.quad, 1); xg = np.linspace(X.ivrv.min(), X.ivrv.max(), 50); ax[0].plot(xg, np.polyval(b, xg), color=O, lw=1.2)
-    style_ax(ax[0], f"(a) 曲率 β₂ と IV−RV（相関 {corr.loc['curv','ivrv']:+.2f}）", "ATM IV − RV₂₀（%pt）", "β₂")
-    ax[1].scatter(X.atm, df.gamma_I, s=14, color=B, alpha=0.75); b = np.polyfit(X.atm, df.gamma_I, 1); xg = np.linspace(X.atm.min(), X.atm.max(), 50); ax[1].plot(xg, np.polyval(b, xg), color=O, lw=1.2)
-    style_ax(ax[1], f"(b) γ̂（直線）と ATM IV（相関 {corr.loc['gamma_I','atm']:+.2f}）", "ATM IV（%）", "γ̂")
-    ax[2].plot(df.date, df.quad, color=B, lw=1.4, label="β₂（左軸）"); a2 = ax[2].twinx(); a2.plot(df.date, X.ivrv, color=O, lw=1.2, label="IV−RV（右軸）"); a2.tick_params(colors=MUT, labelsize=8)
-    style_ax(ax[2], "(c) 推移", "", "β₂"); ax[2].tick_params(axis="x", rotation=45); h1, l1 = ax[2].get_legend_handles_labels(); h2, l2 = a2.get_legend_handles_labels(); ax[2].legend(h1 + h2, l1 + l2, fontsize=7, frameon=False)
-    fig.tight_layout(); return fig_to_img(fig)
+def fig_chan():
+    fig, ax = plt.subplots(1, 3, figsize=(7.2, 2.6))
+    for a_, key, lab, xl in ((ax[0], "A", "(a) f_P の幅（RV）だけ", "RV のスケール"), (ax[1], "B", "(b) f_Q の幅（IV）だけ", "IV のスケール"), (ax[2], "C", "(c) 両方を同率（ボラ水準）", "スケール")):
+        xs = [sc for sc, _ in chan[key]]; a_.plot(xs, [v["gamma"] for _, v in chan[key]], color=B, lw=1.8, marker="o", ms=3, label="γ̂（直線）")
+        a_.plot(xs, [v["gamma_q"] for _, v in chan[key]], color=O, lw=1.4, marker="s", ms=3, label="γ̂_q（2 次式の傾き）"); a_.axhline(0, color=MUT, lw=0.6)
+        style_ax(a_, lab, xl, "γ̂")
+    ax[0].legend(fontsize=7, frameon=False); fig.tight_layout(); return fig_to_img(fig)
 
 
 def fig_weights():
@@ -105,17 +108,18 @@ def fig_weights():
 
 # ------------------------------------------------------------------ 文書
 doc = SimpleDocTemplate(str(PDF_PATH), pagesize=A4, leftMargin=16 * mm, rightMargin=16 * mm, topMargin=16 * mm, bottomMargin=16 * mm, title="プライシングカーネル・パズルと状態依存 γ")
-D = f"{DAY[:4]}-{DAY[4:6]}-{DAY[6:]}"; rg, rq = reg["gamma_I"], reg["quad"]
+D = f"{DAY[:4]}-{DAY[4:6]}-{DAY[6:]}"
 story = [
     Pg("プライシングカーネル・パズルと状態依存 γ", TITLE),
     Pg(f"当方の γ 推定（方法 I〜III）への含意、関連研究の整理、行使価格の出来高・建玉による重み付けの検討（データ: 2026-06-03〜{D} 引け、{len(df)} 営業日）", SUB),
     Pg("要旨", H1),
     Pg("1. 「市場が織り込む γ」は、リスク中立密度 f_Q と実確率密度 f_P の比（プライシングカーネル M）の傾きである。べき効用なら ln M は x = ln(S_T/F) の一次式で、傾きの符号を反転したものが γ となる。"),
     Pg("2. 実際の ln M は一次式ではなく U 字である（プライシングカーネル・パズル）。正規近似で書くと U 字の曲率は β₂ = ½(1/s_P² − 1/s_Q²) であり、「リスク中立の標準偏差 s_Q が実確率の s_P より大きい」こと、すなわちボラティリティ・リスクプレミアムそのものである。"
-       f"{D} 引けでは s_Q = {sQ*100:.2f}%、s_P = {sP*100:.2f}% で予測曲率 {beta2_gauss:+.1f}、観測曲率 {gk['quad']:+.1f}。100 営業日の曲率は ATM IV − RV₂₀ と相関 {corr.loc['curv','ivrv']:+.2f} で動く。"),
+       f"{D} 引けでは s_Q = {sQ*100:.2f}%、s_P = {sP*100:.2f}% で予測曲率 {beta2_gauss:+.1f}、観測曲率 {gk['quad']:+.1f}。曲率は定義上 IV − RV の言い換えであり（100 営業日の相関 {corr_ivrv:+.2f}）、独立の情報ではない。"),
     Pg("3. 従って一次式の γ̂（方法 I の直線）は、U 字のどこを重く見るかで値が変わる（重み依存）。同時に γ̂ は「予測期間中の f_P と f_Q の平均の差 ÷ 分散」に近く、f_P の平均を 1% 動かすだけで 2 前後動く。1 日分の気配から γ の水準を決めることはできず、水準は実現 SQ 値による最尤法（方法 III）で、形状（傾きと曲率）は日次で蓄積する、という分担が妥当である。"),
-    Pg("4. γ が状態変数（ボラティリティ、過去リターン、景気）に依存するという研究は多い（Campbell–Cochrane 1999 の習慣形成、Rosenberg–Engle 2002、Bliss–Panigirtzoglou 2004、Bollerslev–Gibson–Zhou 2011、Christoffersen–Heston–Jacobs 2013、Song–Xiu 2016 ほか）。共通の結論は「γ は一定ではなく、ボラティリティ（分散プレミアム）を第二の状態変数として扱うと U 字が消える」である。"),
-    Pg("5. 出来高・建玉による重み付けは、SVI 当てはめでは ATM IV を 0.1%pt しか変えず、回帰の重みとしては直線の γ̂ を −0.64〜+0.04 の範囲で動かすが、2 次式の傾き（−0.82〜−0.97）と曲率（+12.9〜+15.1）はほぼ不変である。重みは γ の定義に入らないため「情報の重み」としての理論的根拠はなく、推定量の分散を下げる（測定精度の代理）としての使い方に限るのが筋である。"),
+    Pg("4. 日次の γ̂ がボラティリティと逆方向に動く「状態依存」は、選好を固定して f_P・f_Q の幅だけを動かす実験（§2.3）で再現でき、推定法の構造から出る機械的成分が大半である。文献の再現とは言えず、状態依存の証拠にはならない。"),
+    Pg("5. γ が状態変数（ボラティリティ、過去リターン、景気）に依存するという研究は多い（Campbell–Cochrane 1999 の習慣形成、Rosenberg–Engle 2002、Bliss–Panigirtzoglou 2004、Bollerslev–Gibson–Zhou 2011、Christoffersen–Heston–Jacobs 2013、Song–Xiu 2016 ほか）。共通の結論は「γ は一定ではなく、ボラティリティ（分散プレミアム）を第二の状態変数として扱うと U 字が消える」である。"),
+    Pg("6. 出来高・建玉による重み付けは、SVI 当てはめでは ATM IV を 0.1%pt しか変えず、回帰の重みとしては直線の γ̂ を −0.64〜+0.04 の範囲で動かすが、2 次式の傾き（−0.82〜−0.97）と曲率（+12.9〜+15.1）はほぼ不変である。重みは γ の定義に入らないため「情報の重み」としての理論的根拠はなく、推定量の分散を下げる（測定精度の代理）としての使い方に限るのが筋である。"),
     sp(2),
     Pg("1. 準備：記号と基本式", H1),
     Pg("満期 T の先物清算値（SQ 値）を S_T、現在の先物価格を F とし、対数リターンを x = ln(S_T / F) と書く。オプション価格から復元した x の密度（リスク中立密度）を f_Q(x)、実際に起こる x の密度（実確率密度）を f_P(x) とする。"
@@ -147,21 +151,28 @@ story = [
     fig_kernel(),
     Pg(f"図2  {D} 引け（気配時刻 {str(ts)[11:16]}）、11月限。(a) 密度、(b) 対数カーネルと直線・2 次式の当てはめ。点線は 2 次式の切片・傾きを保ったまま曲率だけを正規近似の予測値に置き換えたもの。", CAP),
     CondPageBreak(60 * mm),
-    Pg("2.3 当方データでの検証：曲率はボラティリティ・プレミアムで動く", H2),
-    Pg(f"2.2 の解釈が正しければ、日次の曲率 β₂ は「ATM IV − RV₂₀」と同方向に動くはずである。{len(df)} 営業日について確認した（図 3）。"),
-    fig_state(),
-    Pg(f"図3  日次蓄積（2026-06-03〜{D}）。(a) 曲率と IV−RV の散布図、(b) 直線 γ̂ と ATM IV、(c) 推移。", CAP),
-    TBL([["被説明変数", "定数", "ATM IV（%）", "RV₂₀（%）", "20 日リターン（%）", "残存（日）", "R²"],
-         ["γ̂（直線）", f"{rg.params['const']:+.2f} ({rg.tvalues['const']:+.1f})", f"{rg.params['atm']:+.3f} ({rg.tvalues['atm']:+.1f})", f"{rg.params['rv20']:+.3f} ({rg.tvalues['rv20']:+.1f})", f"{rg.params['ret20']:+.3f} ({rg.tvalues['ret20']:+.1f})", f"{rg.params['T_days']:+.3f} ({rg.tvalues['T_days']:+.1f})", f"{rg.rsquared:.2f}"],
-         ["曲率 β₂", f"{rq.params['const']:+.1f} ({rq.tvalues['const']:+.1f})", f"{rq.params['atm']:+.2f} ({rq.tvalues['atm']:+.1f})", f"{rq.params['rv20']:+.2f} ({rq.tvalues['rv20']:+.1f})", f"{rq.params['ret20']:+.2f} ({rq.tvalues['ret20']:+.1f})", f"{rq.params['T_days']:+.2f} ({rq.tvalues['T_days']:+.1f})", f"{rq.rsquared:.2f}"]],
-        [26, 26, 28, 28, 30, 24, 14]),
-    Pg(f"表2  状態変数への回帰（n = {int(rg.nobs)}、括弧内は Newey–West t 値、ラグ 5）。", CAP),
-    Pg(f"曲率は IV に正、RV に負に反応し（係数はほぼ同じ大きさで逆符号）、IV − RV との相関は {corr.loc['curv','ivrv']:+.2f} である。これは式 2 の β₂ が 1/s_P² − 1/s_Q² であることの直接の帰結で、当方の U 字はボラティリティ・プレミアムで説明できる。"
-       f"直線 γ̂ は ATM IV に負（IV 1%pt 上昇で {rg.params['atm']:+.2f}）で、Bliss–Panigirtzoglou (2004) の「ボラティリティが高いとき γ は低い」と同方向だが、当方の f_P は RV₂₀ で幅を決めているため、IV ≫ RV の局面では f_Q の方が広くなり直線の傾きが機械的に寝る成分を含む。方向は文献と整合するが、独立の証拠とは言えない。"),
+    Pg("2.3 日次 γ̂ の「状態依存」は推定法の構造から出る", H2),
+    Pg("日次の直線 γ̂ を ATM IV に回帰すると負の係数（IV 1%pt あたり約 −0.10）が得られ、Bliss–Panigirtzoglou (2004) の「ボラティリティが高いとき γ は低い」と同方向に見える。しかしこれは証拠にならない。"
+       "f_P は「過去の n 日リターンを当時の RV₂₀ で標準化し、現在の RV₂₀ を掛け直した標本」なので、f_P の幅 s_P も平均 μ_P も現在の RV₂₀ に比例する。f_Q の幅 s_Q は ATM IV で決まる。式 2 の通り γ̂ は分母に分散を持ち、さらに曲率項を直線で当てはめた分が傾きに混ざる。"
+       "つまり γ̂ = g(RV₂₀, IV) という関数形がデータを見る前から推定法に埋め込まれている。"),
+    Pg(f"これを確かめるため、{D} 引けの f_Q と f_P を基準に、<b>選好を何も変えずに幅だけを動かした</b>（表 2・図 3）。"),
+    TBL([["動かすもの", "設定", "s_P", "s_Q", "γ̂（直線）", "γ̂_q（2 次式）", "曲率 β₂"]] +
+        [["(A) f_P の幅だけ（RV）", f"×{sc:.1f}", f"{v['s_p']*100:.1f}%", f"{v['s_q']*100:.1f}%", f"{v['gamma']:+.2f}", f"{v['gamma_q']:+.2f}", f"{v['beta2']:+.0f}"] for sc, v in chan["A"]] +
+        [["(A′) 同上、f_P の平均は固定", f"×{sc:.1f}", f"{v['s_p']*100:.1f}%", f"{v['s_q']*100:.1f}%", f"{v['gamma']:+.2f}", f"{v['gamma_q']:+.2f}", f"{v['beta2']:+.0f}"] for sc, v in chan["A2"]] +
+        [["(B) f_Q の幅だけ（IV）", f"×{sc:.1f}", f"{v['s_p']*100:.1f}%", f"{v['s_q']*100:.1f}%", f"{v['gamma']:+.2f}", f"{v['gamma_q']:+.2f}", f"{v['beta2']:+.0f}"] for sc, v in chan["B"]] +
+        [["(C) 両方を同率（ボラ水準）", f"×{sc:.2f}", f"{v['s_p']*100:.1f}%", f"{v['s_q']*100:.1f}%", f"{v['gamma']:+.2f}", f"{v['gamma_q']:+.2f}", f"{v['beta2']:+.0f}"] for sc, v in chan["C"]],
+        [44, 18, 20, 20, 26, 30, 22]),
+    Pg(f"表2  {D} 引け。基準（×1.0）以外は f_P または f_Q の幅だけを変えた仮想値。投資家の選好に当たるものは一切動かしていない。", CAP),
+    fig_chan(),
+    Pg("図3  表 2 の γ̂。", CAP),
+    Pg(f"選好を固定したまま幅を動かすだけで、直線 γ̂ は IV が上がっても RV が上がっても下がる。両方が連動して動く局面（実際の相場）では IV 1%pt あたり約 {((chan['C'][-1][1]['gamma'] - chan['C'][0][1]['gamma']) / ((chan['C'][-1][0] - chan['C'][0][0]) * r['atm'] * 100)):+.2f} で、回帰係数 −0.10/pt の大半がこの機械的成分で説明できる。"
+       "2 次式の傾き γ̂_q も (C) で同方向に動くため、水準効果を免れていない。曲率 β₂ は (C) で大きく減る（β₂ ∝ 1/ボラ²）ので、状態依存を論じるなら無次元化した β₂·s_P² か (s_Q/s_P)² − 1 を使う必要がある。"
+       "Bliss–Panigirtzoglou の結果は、f_Q をべき効用で傾けた密度が実現リターンをどれだけ当てたかを最大化して得た γ（方法 III）に関するもので、f_P を RV から作っていない。符号が同じでも成り立ちが違い、当方の回帰を文献の再現と読むことはできない。"
+       "以上から、日次横断面の γ̂（直線・2 次式とも）は市場のリスク回避度の水準として報告せず、方法 III の検証材料として蓄積のみ行う（2026-10-22 決定）。"),
     Pg("2.4 説明仮説の整理", H2),
     TBL([["系統", "主張", "代表的研究", "当方データでの位置づけ"],
          ["統計的", "f_P の推定誤差（短い標本、まれな暴落の未観測＝ペソ問題、無条件密度の使用）が U 字を作る。条件付きの f_P を使えば単調に戻る。", "Linn–Shive–Shumway (2018, RFS)", "f_P を RV₂₀ で条件付けしても U 字は残る。平均のずれは傾きを動かすが曲率の符号は変えない（表 1）。"],
-         ["第二状態変数", "M は価格 S だけでなくボラティリティ σ² にも依存する。負の分散プレミアム（ξ > 0）を持つ M を S だけに射影すると U 字が現れる。VIX で条件付けると U 字は消える。", "Christoffersen–Heston–Jacobs (2013, RFS)、Song–Xiu (2016, J. Econometrics)、Bakshi–Madan–Panayotov (2010, JFE)", "曲率と IV−RV の相関 0.79 はこの系統の予測そのもの。"],
+         ["第二状態変数", "M は価格 S だけでなくボラティリティ σ² にも依存する。負の分散プレミアム（ξ > 0）を持つ M を S だけに射影すると U 字が現れる。VIX で条件付けると U 字は消える。", "Christoffersen–Heston–Jacobs (2013, RFS)、Song–Xiu (2016, J. Econometrics)、Bakshi–Madan–Panayotov (2010, JFE)", "曲率 β₂ は定義上 IV−RV と同値で、この系統と整合するが独立の検証ではない。"],
          ["選好", "確率ウエイト（ランク依存効用）、異質な信念と空売り制約、センチメント。", "Polkovnichenko–Zhao (2013, JFE)、Bakshi–Madan–Panayotov (2010)", "日経ではコール側の裾の需要（10/20 出来高上位 75,000・80,000 円）が右側の上昇に寄与しうる。"],
          ["需給・市場構造", "ディーラーの在庫制約により OTM の需要圧力が IV を押し上げ、f_Q が f_P から乖離する。", "Bollen–Whaley (2004, JF)、Gârleanu–Pedersen–Poteshman (2009, RFS)", "建玉・出来高の集中（§4）と併せて検証可能。"]],
         [20, 60, 48, 48]),
@@ -202,9 +213,11 @@ story = [
     Pg("<b>共通する結論。</b>(1) γ は時間を通じて一定ではない。(2) 最も頑健な説明変数はボラティリティ（またはその代理である分散プレミアム）である。(3) ボラティリティを第二の状態変数として明示すると U 字は消え、残る「価格に対する γ」は正の単調減少に戻る。(4) 予測期間（残存日数）にも依存する。"),
     CondPageBreak(60 * mm),
     Pg("3.3 当方の蓄積設計への反映", H2),
-    Pg("表 2 の回帰は f_P の構成（RV₂₀ でスケール）に由来する機械的な成分を含むため、状態依存の証拠としては弱い。実現値に基づく状態依存 γ の推定は、方法 III を次のように拡張する。満期 t ごとに予測時点の状態変数 z_t（IV−RV、20 日リターン、残存日数）を記録し、"),
+    Pg("§2.3 の通り、日次 γ̂ の状態依存は推定法の構造から出るため証拠にならない。実現値に基づく状態依存 γ の推定は、方法 III を次のように拡張する。満期 t ごとに予測時点の状態変数 z_t（IV−RV、20 日リターン、残存日数）を記録し、"),
     EQ(r"\gamma_t = \gamma_0 + \gamma_1\,(\mathrm{IV}-\mathrm{RV})_t + \gamma_2\,\mathrm{ret20}_t,\qquad \max_{\gamma_0,\gamma_1,\gamma_2}\ \sum_t \ln f_{P,t}(S_{T_t};\,\gamma_t)"),
-    Pg("を最大化する。3 母数の識別には実現点が 50〜100 本必要で、月次（年 12 本）では不可能だが、ミニの週次満期（年 100 本前後）を取り込めば 1 年で到達する。現在の日次蓄積（gamma_daily.jsonl）には day, T, F, atm, rv20, ret20, 2 次式の傾きと曲率が入っており、gamma_mle.json の weekly 配列に実現値が加わり次第この回帰に移れる。"),
+    Pg("を最大化する。ただし情報量は点数ではなく暦年数で決まる。指数型の傾け f_P ∝ f_Q·e^{γx} では 1 満期の γ に関するフィッシャー情報が Var(x) ≈ σ²T なので、満期をまたいで足し合わせると Σσ²T ≈ σ² × 予測期間が覆う暦年数となり、"
+       "σ ≈ 30% なら 1 年で 0.09、標準誤差は 1/√0.09 ≈ 3.3 である。週次満期は 1 本あたりの T が短く、同じ暦期間を月次と重複して覆うため、点数が増えても情報はほとんど増えない。"
+       "γ₀ 単独で標準誤差 1 を得るのに約 11 年、3 母数ならその数倍の暦年数が要る。前向きの蓄積だけでは不足で、JPX のヒストリカル・データ（2000 年以降の日次清算値）で方法 III を遡及計算するのが現実的な経路である（別稿「γ 推定レポート」第 5 章）。"),
     Pg("記録しておくべき項目を整理する。"),
     TBL([["項目", "用途", "現状"],
          ["F, T, SVI 母数 p", "f_Q の再構成（任意の γ で傾け直せる）", "蓄積済み"],
@@ -237,7 +250,8 @@ story = [
        "・重み付けで解けない部分（γ と ξ の分離、水準の決定）は、式 4 の 2 母数カーネルを週次満期の実現値で最尤推定することで対処する。"),
     sp(2),
     Pg("5. 結論", H1),
-    Pg("当方が日次で観測している ln(f_Q/f_P) の U 字はプライシングカーネル・パズルそのものであり、その曲率は IV − RV（分散プレミアム）で説明できる。従って「市場が織り込む γ」を 1 つの数字で表すことは特定の誤りであり、(傾き, 曲率) の 2 次元で記録し、水準は実現 SQ 値による最尤法で決める、という分担に改める。文献はいずれも γ の状態依存（ボラティリティ、過去リターン、残存期間）を支持しており、週次満期の実現値が溜まり次第、γ_t = γ₀ + γ₁(IV−RV) + γ₂ ret20 の最尤推定に進む。出来高・建玉の重み付けは γ の定義に根拠を持たず、推定精度の代理としての限定的な使い方に留める。"),
+    Pg("当方が日次で観測している ln(f_Q/f_P) の U 字はプライシングカーネル・パズルそのものであり、その曲率は IV − RV（分散プレミアム）の言い換えである。日次横断面の γ̂ は f_P の平均・幅の仮定とボラ水準に支配され、選好を固定しても ±1 動くため、市場のリスク回避度の水準としては報告しない。"
+       "γ の水準は実現 SQ 値による最尤法（方法 III）でのみ決まり、その精度は点数ではなく暦年数で決まる（1 年で標準誤差 ≈ 3、11 年で ≈ 1）。前向きの蓄積と並行して JPX のヒストリカル・データによる遡及が必要である。出来高・建玉の重み付けは γ の定義に根拠を持たず、推定精度の代理としての限定的な使い方に留める。"),
     Pg("参考文献", H2),
     Pg("Aït-Sahalia, Y., Lo, A. W. (2000) Nonparametric risk management and implied risk aversion. J. Econometrics 94. / Bakshi, G., Madan, D., Panayotov, G. (2010) Returns of claims on the upside and the viability of U-shaped pricing kernels. JFE 97. / Barberis, N., Huang, M., Santos, T. (2001) Prospect theory and asset prices. QJE 116. / "
        "Beare, B., Schmidt, L. (2016) An empirical test of pricing kernel monotonicity. J. Applied Econometrics 31. / Bliss, R. R., Panigirtzoglou, N. (2004) Option-implied risk aversion estimates. JF 59. / Bollen, N., Whaley, R. (2004) Does net buying pressure affect the shape of implied volatility functions? JF 59. / "

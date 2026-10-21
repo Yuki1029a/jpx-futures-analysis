@@ -107,9 +107,7 @@ src_time = (source_time(ks[0]) or snap_ts.strftime("%H:%M:%S"))[:5]
 m = iv_views.with_eff_iv(load_snapshot(ks[0])); g = m[m.contract_month == CM].copy()
 # べき効用による実確率の近似（第 8 章）と市場の γ（gamma_calc.py の出力があれば）
 _dK = np.gradient(K); _mQ = fK * _dK; _mQ = _mQ / _mQ.sum()
-_gstore = Path(__file__).resolve().parent.parent / "cache" / "derived" / "gamma_daily.jsonl"  # 日次蓄積（gamma_daily.py）から当日の γ̂ を取る
-_grow = next((json.loads(l) for l in _gstore.read_text(encoding="utf-8").splitlines()[::-1] if l.strip() and json.loads(l)["day"] == snap_ts.strftime("%Y%m%d")), None) if _gstore.exists() else None
-gamma_hat = (_grow.get("gamma_q", _grow.get("gamma_I_quad")) if _grow else None); beta2 = (_grow.get("beta2", _grow.get("quad")) if _grow else None); gamma_II = _grow["gamma_II"] if _grow else None  # 主指標 = 2 次式の傾き（2026-10-21）
+gamma_hat = None  # 市場推定 γ̂ は掲載しない（2026-10-22 決定）。1 日の横断面から出る γ̂ は f_P の平均・幅の仮定に支配される（別稿「プライシングカーネル・パズルと状態依存 γ」）
 TILT_ROWS = []
 for g_ in [0.0, 2.0, 4.0, 6.0] + ([round(gamma_hat, 2)] if gamma_hat is not None else []):
     stt = rnd_stats(K, rnd_tilt(K, fK, g_))
@@ -552,17 +550,16 @@ S += [Pg("7. 織り込みの推移（10月SQ 以降）", H1),
       Pg("<b>(2) スキュー・プレミアム。</b>下落局面で損失が出る資産を持つ投資家にとって、下落時に価値が上がるプットは保険であり、保険料を上乗せして買われる"
          "（Bakshi, Kapadia and Madan 2003）。この分だけ低い行使価格の IV が高くなり、リスク中立分布の左裾は実確率より厚くなる。この効果は価格データだけでは除去できない。"
          f"P(S_T < 60,000) = {cdf[60000]*100:.1f}% は実確率の上限側の見積もりと読むのが妥当である。"),
-      CondPageBreak(120 * mm), Pg("8.3 べき効用による実確率の近似と、市場から推定した γ", H2),
+      CondPageBreak(120 * mm), Pg("8.3 べき効用による実確率の近似（γ = 0, 2, 4, 6）", H2),
       Pg("代表的投資家がべき効用 U(S) = S^(1−γ)/(1−γ) を持つと仮定すると、実確率密度は f_P(S) ∝ f_Q(S)·S^γ で近似できる（γ は相対的リスク回避度。詳細は系統A 解説 A2 章）。"
-         "γ = 2〜6 は文献の代表値、γ̂ は本日のリスク中立密度と歴史的リターン分布（直近の実現ボラティリティで再スケール）の比の対数を 2 次式で当てはめた傾き（ATM 近傍の局所リスク回避度、主指標）である（推定法と精度は別稿「市場が織り込むリスク回避度 γ」）。"),
+         "γ = 2〜6 は文献の代表値（Bliss–Panigirtzoglou 2004 の 4 前後を中心に幅を持たせたもの）。市場が織り込む γ の推定は実現 SQ 値の蓄積（方法 III、別稿）で行い、本稿には掲載しない。"),
       fig_tilt(),
       TBL([["γ", "平均", "中央値", "最頻値", "5% 点", "95% 点", "P(<60,000)", "P(<65,000)", "P(≥70,000)"]] +
           [[("0（リスク中立）" if g_ == 0 else (f"γ̂ = {g_:.2f}" if gamma_hat is not None and abs(g_ - round(gamma_hat, 2)) < 1e-9 else f"{g_:.0f}")), fmt(mn), fmt(md), fmt(mo), fmt(q5), fmt(q95), f"{p60*100:.1f}%", f"{p65*100:.1f}%", f"{p70*100:.1f}%"]
            for g_, mn, md, mo, q5, q95, p60, p65, p70 in TILT_ROWS], [26, 19, 19, 19, 19, 19, 19, 19, 19]),
       Pg("表10  γ による実確率の近似。γ が大きいほど保険料として取り除く分が大きく、分布は右へ寄る。", CAP),
-      Pg((f"市場から推定した γ̂ = {gamma_hat:.2f} は文献の代表値（4 前後）より大幅に小さく、{'負の値である' if gamma_hat < 0 else 'ゼロに近い'}。同時に曲率 β₂ = {beta2:+.1f} は正で、対数カーネルは U 字（中央で保険料が小さく両裾で大きい）である。"
-          "β₂ はリスク中立分布がヒストリカルより広いこと（ATM IV > RV₂₀、ボラティリティ・プレミアム）の密度表現であり、べき効用の一つの γ で保険料を表すこと自体に限界がある。" if gamma_hat is not None else "γ̂ は別稿の推定結果を参照。") +
-         "γ の推定値は日々変動し、推定法によっても差がある（モーメント法では 2〜3）。実確率の帯としては γ = 0 と γ = 4 の両端を併記して読むのが現実的である。"),
+      Pg("γ は観測できない。1 日の気配と歴史的リターン分布の比から γ を出す方法（カーネル法）は、歴史的分布の平均と幅の仮定に支配され、選好が不変でもボラティリティ水準だけで ±1 動くため、市場推定値は掲載しない。"
+         "実現 SQ 値による最尤推定（方法 III）が十分に蓄積されるまでは、実確率の帯として γ = 0 と γ = 4 の両端を併記して読む。"),
       # ================================================================== 9 限界
       Pg("9. 限界", H1),
       Pg(f"・スナップショットは 15 分遅延であり、日中立会の気配時刻 {src_time} の気配に基づく（15:30 までの最終。15:30 以降はマーケットメイカーが気配を引くため使わない）。夜間立会以降の変動は含まない。建玉は同日引け分（20:00 公表）である。"),
