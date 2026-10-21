@@ -44,7 +44,7 @@ TMP = Path(os.environ["TMP"])
 J = json.load(open(TMP / "rnd.json"))
 Z = np.load(TMP / "rnd.npz", allow_pickle=True)
 PDF_PATH = OUT_DIR / "nk225op_2611_sq_rnd_report.pdf"
-CM, SQ_DATE, OI_DATE = "2611", "2026-11-13", date(2026, 10, 20)
+CM, SQ_DATE, OI_DATE = "2611", "2026-11-13", date(2026, 10, 21)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rnd_lib import day_close_snap, rr_delta as rr_delta_key, source_time, stats as rnd_stats, tilt as rnd_tilt  # noqa: E402
 GAMMA_JSON = TMP / "gcalc" / "gamma_calc.json"
@@ -77,7 +77,7 @@ def rr_delta(day, mt):
     return (np.interp(-0.25, p_.delta, p_.eff_iv) - np.interp(0.25, c_.delta, c_.eff_iv)) * 100
 
 
-_days = ["20261009", "20261013", "20261014", "20261015", "20261016", "20261019", "20261020"][-len(ev):]
+_days = ["20261009", "20261013", "20261014", "20261015", "20261016", "20261019", "20261020", "20261021"][-len(ev):]
 ev["RR25(Δ基準)"] = [round(rr_delta_key(day_close_snap(d, CM), CM), 2) for d in _days]
 
 
