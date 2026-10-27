@@ -34,3 +34,8 @@ if __name__ == "__main__":
         r = subprocess.run([sys.executable, str(ROOT / "scripts" / "fetch_qri_iv.py"), "--r2", "--no-local"],
                            stdout=f, stderr=subprocess.STDOUT, timeout=600)
         f.write(f"exit {r.returncode}\n")
+        # 平日 06:00-06:30 の回（夜間引け後）に J-Quants の前営業日分（立会内／立会外の内訳など）を取得して R2 へ
+        if now.weekday() <= 4 and 6 * 60 <= now.hour * 60 + now.minute < 6 * 60 + 30:
+            f.write("--- jquants options\n"); f.flush()
+            r2 = subprocess.run([sys.executable, str(ROOT / "scripts" / "fetch_jquants_options.py"), "--upload"], stdout=f, stderr=subprocess.STDOUT, timeout=600)
+            f.write(f"exit {r2.returncode}\n")

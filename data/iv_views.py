@@ -554,7 +554,16 @@ def flow_judgement(days: list[str], cm: str, mini: bool = False) -> tuple[pd.Dat
                 "volume": r.volume,
             })
         meta.update(source="jpx", trade_day=d, iv_days=(d, prv_day))
-        return _level_judge(pd.DataFrame(rows), lvl_q, lvl_all, meta)
+        out = pd.DataFrame(rows)
+        if not mini and len(out):  # 立会内／立会外の内訳（J-Quants 日次、scripts/fetch_jquants_options.py）
+            try:
+                from data.jquants_options import volume_split
+                vs = volume_split(d, cm)
+                if vs is not None and len(vs):
+                    out = out.merge(vs[["option_type", "strike", "vooa", "vo_off"]], on=["option_type", "strike"], how="left")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("volume split unavailable for %s: %s", d, e)
+        return _level_judge(out, lvl_q, lvl_all, meta)
 
     # ---- 2) フォールバック: QRIのOI欄（翌取引日朝反映）ペア方式 ----
     snaps: list[tuple[str, pd.DataFrame]] = []

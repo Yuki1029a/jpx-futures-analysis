@@ -141,6 +141,7 @@ def render_strike_section(days_sel: list[str], cm_sel: str, df: pd.DataFrame, n_
                "建玉増×IV上昇=新規買い / 建玉増×IV低下=新規売り / "
                "建玉減×IV上昇=買い戻し / 建玉減×IV低下=手仕舞い / "
                f"|超過ΔIV|<{iv_views._NEUTRAL_BAND}%ptは中立")
+    st.caption("立会内／立会外 = J-Quants 日次データ（VoOA、Vo−VoOA）。立会外は J-NET のクロス等で、板の IV をほとんど動かさない。未取得日・ミニオプションは空欄。")
     st.caption("出来高加重超過ΔIV = Σ e(t)·Δ出来高(t) ÷ Σ Δ出来高(t)。e(t) = 直前スナップショットからの"
                f"ΔIV − 同時点の地合い（{term}内ΔIV中央値）。窓は超過ΔIVと同じで、売買が入った区間のIVの動きのみを集計"
                "（判定には未使用）")
@@ -151,12 +152,17 @@ def render_strike_section(days_sel: list[str], cm_sel: str, df: pd.DataFrame, n_
         tbl = fl[fl.d_oi.notna() & (fl.d_oi != 0)].copy()
         if "vw_ex_pct" not in tbl.columns:  # QRIフォールバック時は未算出
             tbl["vw_ex_pct"] = None
+        for c in ("vooa", "vo_off"):  # 立会内／立会外（J-Quants 未取得日・ミニは欠損）
+            if c not in tbl.columns:
+                tbl[c] = None
         tbl["judge"] = tbl.judge.where(tbl.judge != "", "判定不能(IV欠損)")
         show_fl = tbl.reindex(tbl.d_oi.abs().sort_values(ascending=False).index).head(15)
-        show_fl = show_fl[["option_type", "strike", "oi", "d_oi", "volume",
+        show_fl = show_fl[["option_type", "strike", "oi", "d_oi", "volume", "vooa", "vo_off",
                            "iv_pct", "d_iv_pct", "d_iv_ex_pct", "vw_ex_pct", "judge"]]
-        show_fl.columns = ["タイプ", "行使", "建玉", "Δ建玉", "出来高",
+        show_fl.columns = ["タイプ", "行使", "建玉", "Δ建玉", "出来高", "立会内", "立会外",
                            "IV%", "ΔIV%pt", "超過ΔIV", "出来高加重超過ΔIV", "判定"]
+        for c in ("立会内", "立会外"):
+            show_fl[c] = pd.to_numeric(show_fl[c], errors="coerce")
         show_fl["出来高加重超過ΔIV"] = pd.to_numeric(show_fl["出来高加重超過ΔIV"], errors="coerce").round(2)
         show_fl["IV%"] = show_fl["IV%"].round(1)
         show_fl["ΔIV%pt"] = show_fl["ΔIV%pt"].round(2)
