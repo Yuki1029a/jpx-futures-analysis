@@ -102,7 +102,7 @@ def skew25(p, T, xs, ivf):
 # ---------------- latest ----------------
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 from rnd_lib import day_close_snap  # 気配時刻 15:30:59 以前の最終スナップショット（夜間の気配は使わない）
-ASOF_DAY, OI_DATE = "20261026", date(2026, 10, 26)  # 基準時点: 日中引け、建玉は同日 20:00 公表分
+ASOF_DAY, OI_DATE = "20261027", date(2026, 10, 27)  # 基準時点: 日中引け、建玉は同日 20:00 公表分
 k0 = day_close_snap(ASOF_DAY, CM)
 ts, F, T, pts, g = prep(k0)
 p, rmse = fit_svi(pts, T)
@@ -148,7 +148,7 @@ KP, fP, gP, _ = density(pP, F, T, xs); sP = stats(KP, fP)
 print("P-proxy quantiles:", {k: round(v) for k, v in sP['q'].items()}, "g_min", round(float(gP.min()), 4))
 # ---------------- evolution ----------------
 ev = []
-for d in ["20261009", "20261013", "20261014", "20261015", "20261016", "20261019", "20261020", "20261021", "20261022", "20261023", "20261026"]:
+for d in ["20261009", "20261013", "20261014", "20261015", "20261016", "20261019", "20261020", "20261021", "20261022", "20261023", "20261026", "20261027"]:
     k = day_close_snap(d, CM)
     if k is None:
         continue
