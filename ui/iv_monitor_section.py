@@ -39,6 +39,59 @@ def _fmt_d(d: str) -> str:
     return f"{int(d[4:6])}/{int(d[6:8])}"
 
 
+_BOARD_COLS = [("oi", "建玉"), ("d_oi", "Δ建玉"), ("volume", "出来高"), ("vooa", "立会内"), ("vo_off", "立会外"),
+               ("iv_pct", "IV%"), ("d_iv_ex_pct", "超過ΔIV"), ("vw_ex_pct", "加重超過ΔIV"), ("judge", "判定")]
+
+
+def _render_board(fl: pd.DataFrame, df: pd.DataFrame, cm_sel: str, key_prefix: str) -> None:
+    """全行使価格をオプションボードの形（プット列｜行使価格｜コール列）で表示する。"""
+    t = fl.copy()
+    for c, _ in _BOARD_COLS:
+        if c not in t.columns:
+            t[c] = None
+    t["judge"] = t.judge.where(t.judge.astype(str) != "", "")
+    c1, c2 = st.columns([1, 3])
+    hide = c1.checkbox("出来高・Δ建玉ともゼロの行使を隠す", value=True, key=f"{key_prefix}_hide0")
+    rng = c2.select_slider("ATM からの範囲", options=["±5%", "±10%", "±15%", "±20%", "全て"], value="±15%", key=f"{key_prefix}_rng")
+    put = t[t.option_type == "PUT"].set_index("strike"); call = t[t.option_type == "CALL"].set_index("strike")
+    strikes = sorted(set(put.index) | set(call.index))
+    board = pd.DataFrame({"行使": strikes})
+    for side, src, pre in (("PUT", put, "P "), ("CALL", call, "C ")):
+        for c, lab in (_BOARD_COLS[::-1] if side == "PUT" else _BOARD_COLS):
+            board[pre + lab] = [src[c].get(k) if k in src.index else None for k in strikes]
+    order = [pre + lab for lab in [x[1] for x in _BOARD_COLS[::-1]] for pre in ("P ",)] + ["行使"] + ["C " + x[1] for x in _BOARD_COLS]
+    board = board[order]
+    summ = iv_views.month_summary(df); srow = summ[summ.contract_month == cm_sel]
+    atm_k = float(srow.iloc[0].atm_strike) if len(srow) and pd.notna(srow.iloc[0].atm_strike) else None
+    if atm_k and rng != "全て":
+        w = int(rng.strip("±%")) / 100
+        board = board[(board["行使"] >= atm_k * (1 - w)) & (board["行使"] <= atm_k * (1 + w))]
+    if hide:
+        num = lambda c: pd.to_numeric(board[c], errors="coerce").fillna(0)
+        board = board[(num("P 出来高") + num("C 出来高") + num("P Δ建玉").abs() + num("C Δ建玉").abs()) > 0]
+    for c in board.columns:
+        if c.endswith(("建玉", "Δ建玉", "出来高", "立会内", "立会外")):
+            board[c] = pd.to_numeric(board[c], errors="coerce").round(0)
+        elif c.endswith(("IV%",)):
+            board[c] = pd.to_numeric(board[c], errors="coerce").round(1)
+        elif c.endswith(("超過ΔIV",)):
+            board[c] = pd.to_numeric(board[c], errors="coerce").round(2)
+    for c in ("P 判定", "C 判定"):
+        board[c] = board[c].fillna("").replace({"None": ""})
+    board.insert(board.columns.get_loc("行使") + 1, "ATM", ["●" if atm_k and abs(k - atm_k) < 1 else "" for k in board["行使"]])
+
+    def _style(col):
+        if col.name.startswith("P "):
+            return ["background-color: #fff3ee"] * len(col)
+        if col.name.startswith("C "):
+            return ["background-color: #eef4fd"] * len(col)
+        return ["font-weight: 600"] * len(col)
+
+    st.caption(f"全 {len(strikes)} 行使のうち {len(board)} 行を表示。判定 = Δ建玉 × 超過ΔIV（下の注記と同じ定義）。")
+    st.dataframe(board.style.apply(_style, axis=0).format(precision=2, na_rep="", thousands=","), hide_index=True,
+                 use_container_width=True, height=min(900, 38 + 35 * max(len(board), 1)))
+
+
 def render_strike_section(days_sel: list[str], cm_sel: str, df: pd.DataFrame, n_hist: int, intra_n: int, *,
                           mini: bool = False, fmt_cm=None, key_prefix: str = "ps") -> None:
     """選択限月（満期）の Δ建玉×超過ΔIV 判定表と、選択行使の日次・日内チャートを描く。
@@ -141,18 +194,23 @@ def render_strike_section(days_sel: list[str], cm_sel: str, df: pd.DataFrame, n_
                "建玉増×IV上昇=新規買い / 建玉増×IV低下=新規売り / "
                "建玉減×IV上昇=買い戻し / 建玉減×IV低下=手仕舞い / "
                f"|超過ΔIV|<{iv_views._NEUTRAL_BAND}%ptは中立")
-    st.caption("立会内／立会外 = J-Quants 日次データ（VoOA、Vo−VoOA）。立会外は J-NET のクロス等で、板の IV をほとんど動かさない。未取得日・ミニオプションは空欄。")
+    src_txt = {"日報": "JPX 日報（siop_dyr）の J-NET 節", "J-Quants": "J-Quants 日次（VoOA）"}.get(fmeta.get("split_src"), "未取得（日報・J-Quants とも無し）")
+    st.caption(f"立会内／立会外 = 出来高のうち板（日中＋夜間）と J-NET（立会外クロス）の内訳。出所: {src_txt}。立会外は板の IV をほとんど動かさない。"
+               "行使価格別の日中／夜間の内訳は公表されていない。")
     st.caption("出来高加重超過ΔIV = Σ e(t)·Δ出来高(t) ÷ Σ Δ出来高(t)。e(t) = 直前スナップショットからの"
                f"ΔIV − 同時点の地合い（{term}内ΔIV中央値）。窓は超過ΔIVと同じで、売買が入った区間のIVの動きのみを集計"
                "（判定には未使用）")
 
     # ---- Δ建玉 × 超過ΔIV 判定 ----
-    if len(fl):
+    view = st.radio("表の範囲", ["全行使価格（プット｜行使｜コール）", "Δ建玉上位15"], horizontal=True, key=f"{key_prefix}_tblview")
+    if len(fl) and view.startswith("全行使"):
+        _render_board(fl, df, cm_sel, key_prefix)
+    elif len(fl):
         # テーブルはΔ建玉が動いた全系列が母集団（IV欠損=判定不能も含める）
         tbl = fl[fl.d_oi.notna() & (fl.d_oi != 0)].copy()
         if "vw_ex_pct" not in tbl.columns:  # QRIフォールバック時は未算出
             tbl["vw_ex_pct"] = None
-        for c in ("vooa", "vo_off"):  # 立会内／立会外（J-Quants 未取得日・ミニは欠損）
+        for c in ("vooa", "vo_off"):  # 立会内／立会外（未取得日は欠損）
             if c not in tbl.columns:
                 tbl[c] = None
         tbl["judge"] = tbl.judge.where(tbl.judge != "", "判定不能(IV欠損)")

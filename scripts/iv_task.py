@@ -39,3 +39,9 @@ if __name__ == "__main__":
             f.write("--- jquants options\n"); f.flush()
             r2 = subprocess.run([sys.executable, str(ROOT / "scripts" / "fetch_jquants_options.py"), "--upload"], stdout=f, stderr=subprocess.STDOUT, timeout=600)
             f.write(f"exit {r2.returncode}\n")
+        # 平日 09:15-09:45 と 12:00-12:15 の回に、前営業日の日報（siop_dyr、翌営業日 09:00 頃公表）から行使価格別の立会内／立会外を作成して R2 へ（作成済みならスキップ）
+        m = now.hour * 60 + now.minute
+        if now.weekday() <= 4 and (9 * 60 + 15 <= m < 9 * 60 + 45 or 12 * 60 <= m < 12 * 60 + 15):
+            f.write("--- jnet split\n"); f.flush()
+            r3 = subprocess.run([sys.executable, str(ROOT / "scripts" / "build_jnet_split.py"), "--upload"], stdout=f, stderr=subprocess.STDOUT, timeout=900)
+            f.write(f"exit {r3.returncode}\n")

@@ -64,7 +64,7 @@ _HEADER_X_LIMIT = 120.0   # 商品名・市場区分・銘柄区分は x0 がこ
 _ROW_TOL = 3.0            # 同一行とみなす top の許容差 (pt)
 
 
-def parse_siop_pdf(content: bytes, product_name: str = _TARGET_PRODUCT) -> tuple[date, list[dict]]:
+def parse_siop_pdf(content: bytes, product_name: str | tuple[str, ...] = _TARGET_PRODUCT) -> tuple[date, list[dict]]:
     """siop_dyr PDF から日経225オプション (ラージ) の銘柄別行を返す。
 
     Returns:
@@ -73,8 +73,10 @@ def parse_siop_pdf(content: bytes, product_name: str = _TARGET_PRODUCT) -> tuple
         trading_volume int, trading_value_yen int, open_interest int,
         settlement_price float|None, exercised int, market 'auction'|'jnet'
       '…' は 0 (settlement_price は None)。J-NET 行は OI/清算/権利行使なし。
-    ミニオプション・TOPIX 等の他商品ページは除外する。
+      product（商品名）、last_day（最終取引日 'mm.dd'）も付く。
+    product_name に商品名のタプルを渡すと、複数商品を 1 回の走査で抽出する。それ以外の商品ページは除外する。
     """
+    targets = (product_name,) if isinstance(product_name, str) else tuple(product_name)
     report_date: date | None = None
     rows: list[dict] = []
     section: str | None = None
@@ -85,7 +87,7 @@ def parse_siop_pdf(content: bytes, product_name: str = _TARGET_PRODUCT) -> tuple
             words = page.extract_words(x_tolerance=1.5)
             lines = _group_lines(words)
             product, market_jp, kind = _page_header(lines)
-            if product != product_name or market_jp not in _MARKETS:
+            if product not in targets or market_jp not in _MARKETS:
                 continue
             if report_date is None:
                 report_date = _find_date(words)
@@ -124,6 +126,8 @@ def parse_siop_pdf(content: bytes, product_name: str = _TARGET_PRODUCT) -> tuple
                     "settlement_price": _to_float(cols.get("settle")),
                     "exercised": _to_int(cols.get("exercised")),
                     "market": market,
+                    "product": product,
+                    "last_day": line[1]["text"],
                 })
 
     if report_date is None:

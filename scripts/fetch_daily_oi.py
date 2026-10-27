@@ -117,6 +117,13 @@ def main():
     except Exception:
         logger.warning("PDF backfill failed", exc_info=True)
 
+    # --- 5. 行使価格別の立会内／立会外（日報 siop_dyr の J-NET 節）→ R2 jnet/siop/ ---
+    try:
+        import subprocess
+        subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "build_jnet_split.py"), "--upload"], check=False, timeout=1500)
+    except Exception:
+        logger.warning("J-NET split build failed", exc_info=True)
+
     logger.info("Done.")
 
 

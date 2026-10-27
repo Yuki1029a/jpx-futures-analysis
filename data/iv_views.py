@@ -555,12 +555,15 @@ def flow_judgement(days: list[str], cm: str, mini: bool = False) -> tuple[pd.Dat
             })
         meta.update(source="jpx", trade_day=d, iv_days=(d, prv_day))
         out = pd.DataFrame(rows)
-        if not mini and len(out):  # 立会内／立会外の内訳（J-Quants 日次、scripts/fetch_jquants_options.py）
+        if len(out):  # 立会内／立会外の内訳（日報 siop_dyr の J-NET 節を優先、無ければ J-Quants。data/jnet_split.py）
             try:
-                from data.jquants_options import volume_split
-                vs = volume_split(d, cm)
-                if vs is not None and len(vs):
-                    out = out.merge(vs[["option_type", "strike", "vooa", "vo_off"]], on=["option_type", "strike"], how="left")
+                from data.jnet_split import volume_split
+                vs, src = volume_split(d, cm, mini)
+                if vs is not None:
+                    out = out.merge(vs, on=["option_type", "strike"], how="left")
+                    out["vo_off"] = pd.to_numeric(out.vo_off, errors="coerce").fillna(0.0)
+                    out["vooa"] = (pd.to_numeric(out.volume, errors="coerce") - out.vo_off).clip(lower=0)
+                    meta["split_src"] = src
             except Exception as e:  # noqa: BLE001
                 logger.warning("volume split unavailable for %s: %s", d, e)
         return _level_judge(out, lvl_q, lvl_all, meta)

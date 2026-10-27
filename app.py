@@ -32,7 +32,7 @@ st.set_page_config(
 ensure_cache_dirs()
 
 # Debug: deployment version
-_APP_VERSION = "2026-10-27a"
+_APP_VERSION = "2026-10-28a"
 
 
 def _get_or_load(product, contract_month, week, sk_str, session_keys):
@@ -197,7 +197,7 @@ def _render_options_section(week, opt_cm, opt_pids):
                 st.info("オプションデータなし")
                 continue
 
-            render_option_strike_table(opt_rows, week, tab_label=label)
+            render_option_strike_table(opt_rows, week, tab_label=label, contract_month=opt_cm)
 
 
 def _render_gex_section(week, opt_cm, opt_pids):

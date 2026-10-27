@@ -27,10 +27,47 @@ _SUMMARY_CALL = "#C8DEFF"   # summary row CALL
 _SUMMARY_STRIKE = "#E8E8C0" # summary row strike
 
 
+def _apply_auction_split(rows: list[OptionStrikeRow], week: WeekDefinition, contract_month: str, tab_label: str):
+    """立会内／立会外タブでは JPX 出来高（建玉残高表の取引高 = 立会内＋J-NET）を内訳に置き換える。
+
+    内訳は日報 siop_dyr の J-NET 節（無ければ J-Quants）。行使価格別の日中／夜間の内訳は公表が無いため、
+    「立会内(日中)」「立会内(夜間)」とも立会内の日中＋夜間合算、「立会外」も同様に合算を表示する。
+    Returns (rows, 出所の集合, 内訳が無かった日の一覧)。
+    """
+    import dataclasses
+    if not contract_month or not tab_label.startswith(("立会内", "立会外")):
+        return rows, set(), []
+    from data.jnet_split import volume_split
+    cm = str(contract_month)[-4:]
+    want_off = tab_label.startswith("立会外")
+    maps, srcs, missing = {}, set(), []
+    for td in week.trading_days:
+        vs, src = volume_split(td, cm)
+        if vs is None:
+            missing.append(td); continue
+        srcs.add(src); maps[td] = {(r.option_type, int(r.strike)): float(r.vo_off) for r in vs.itertuples()}
+
+    def remap(vol: dict, ot: str, strike: int) -> dict:
+        out = {}
+        for td, tot in vol.items():
+            if td not in maps:
+                continue  # 内訳不明の日は空欄
+            off = maps[td].get((ot, strike), 0.0)
+            v = off if want_off else max(tot - off, 0.0)
+            if v > 0:
+                out[td] = v
+        return out
+
+    new = [dataclasses.replace(r, put_daily_jpx_volume=remap(r.put_daily_jpx_volume, "PUT", r.strike_price),
+                               call_daily_jpx_volume=remap(r.call_daily_jpx_volume, "CALL", r.strike_price)) for r in rows]
+    return new, srcs, missing
+
+
 def render_option_strike_table(
     rows: list[OptionStrikeRow],
     week: WeekDefinition,
     tab_label: str = "",
+    contract_month: str = "",
 ) -> None:
     """Render single interactive option table + detail panel."""
     title = f"日経225オプション ({week.label})"
@@ -41,6 +78,15 @@ def render_option_strike_table(
     if not rows:
         st.warning("オプションデータがありません。")
         return
+
+    rows, split_srcs, split_missing = _apply_auction_split(rows, week, contract_month, tab_label)
+    if tab_label.startswith(("立会内", "立会外")):
+        kind = "立会内（板）" if tab_label.startswith("立会内") else "立会外（J-NET）"
+        msg = (f"「P出dd / C出dd」= JPX 出来高のうち{kind}分（日中＋夜間の合算。行使価格別のセッション内訳は公表なし）。"
+               f"出所: {'・'.join(sorted(split_srcs)) or '—'}。手口列（参加者別）はこのタブのセッションのみ。")
+        if split_missing:
+            msg += " 内訳未取得の日: " + "、".join(f"{d:%m/%d}" for d in split_missing)
+        st.caption(msg)
 
     # Build DataFrame
     ordered_cols = _build_column_order(week)

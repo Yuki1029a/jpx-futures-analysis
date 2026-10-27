@@ -34,9 +34,10 @@ def load_day(d: date | str) -> pd.DataFrame | None:
             df = pd.read_parquet(io.BytesIO(b))
     except Exception as e:  # noqa: BLE001
         logger.warning("jquants load failed %s: %s", key, e)
-    if len(_CACHE) > 64:
-        _CACHE.clear()
-    _CACHE[key] = df
+    if df is not None:  # 未取得（None）はキャッシュしない（当日分が後から入るため）
+        if len(_CACHE) > 64:
+            _CACHE.clear()
+        _CACHE[key] = df
     return df
 
 
