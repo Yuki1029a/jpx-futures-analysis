@@ -382,19 +382,50 @@ def _jpx_daily_oi_frame(trade_day: date, cm: str, mini: bool = False) -> pd.Data
     } for r in recs])
 
 
+_DAY_CLOSE_QUOTE = "15:30:59"  # 日中引けの気配時刻の上限。15:30 以降はマーケットメイカーが気配を引く
+
+
+def _quote_time(df: pd.DataFrame) -> str | None:
+    """スナップショットの気配時刻（source_update_time、'YYYY-MM-DD HH:MM:SS'）。"""
+    if "source_update_time" not in df.columns:
+        return None
+    s = df.source_update_time.dropna().astype(str)
+    return s.iloc[0][:19] if len(s) else None
+
+
 def _day_iv_snapshot(day_str: str, cm: str, min_rows: int = 5,
                      max_walk: int = 6, mini: bool = False) -> tuple[str, pd.DataFrame] | None:
-    """16:59以前で「当該限月のIVが実際に入っている」最後の (key, df)。
+    """日中引けのスナップショット (key, df)。
 
-    引け後スナップショットは板クリアでIVが全欠損の日がある（例: 7/7 16:53）。
-    その場合は最大 max_walk 本さかのぼり、有効IVが min_rows 以上ある
-    スナップショットを使う。全滅なら16:59以前の最終（空でも）を返す。
+    第1候補: 気配時刻（source_update_time）が当日 08:45〜15:30:59 の最終で、当該限月の両気配が 20 本以上あるもの
+             （無ければ同じ時間帯で有効IVが min_rows 以上ある最終）。
+    15:30 以降はマーケットメイカーが気配を引き、両気配が 1/4 程度に減る。残った片気配・異常な気配で IV が歪むため使わない
+    （例: 2026-10-27 気配 15:59 の 11月限 62,000P は bid 24.8% / ask 63.1% で仲値 43.9%、前後の気配では 34.1%）。
+    気配時刻で選べない日（気配時刻の無い古いデータ等）は、取得時刻 16:59 以前で有効IVのある最終（従来の方式）。
     """
     keys = snapshot_keys(day_str, mini)
     if not keys:
         return None
-    pre = [k for k in keys
-           if k.rsplit("_", 1)[-1].split(".")[0] <= "165959"] or keys
+    dd = f"{day_str[:4]}-{day_str[4:6]}-{day_str[6:8]}"
+    stamp = lambda k: k.rsplit("_", 1)[-1].split(".")[0]
+    fallback_q: tuple[str, pd.DataFrame] | None = None
+    for k in reversed([k for k in keys if "084500" <= stamp(k) <= "165959"]):
+        df = load_snapshot(k)
+        if df is None or df.empty:
+            continue
+        q = _quote_time(df)
+        if not q or q[:10] != dd or not ("08:45:00" <= q[11:19] <= _DAY_CLOSE_QUOTE):
+            continue
+        g = with_eff_iv(df)
+        g = g[g.contract_month == cm]
+        if int((g.ask_iv.notna() & g.bid_iv.notna()).sum()) >= 20:
+            return k, df
+        if fallback_q is None and int(g.eff_iv.notna().sum()) >= min_rows:
+            fallback_q = (k, df)
+    if fallback_q is not None:
+        return fallback_q
+    # 従来方式（気配時刻で選べない場合のみ）
+    pre = [k for k in keys if stamp(k) <= "165959"] or keys
     last: tuple[str, pd.DataFrame] | None = None
     for k in reversed(pre[-max_walk:]):
         df = load_snapshot(k)
